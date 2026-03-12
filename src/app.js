@@ -1,5 +1,7 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -8,7 +10,7 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 
-const { initDB } = require('./config/database');
+const { initDB, getPool } = require('./config/database');
 const { initFirebase } = require('./config/firebase');
 const { Server: SocketServer } = require('socket.io');
 const { initSocket } = require('./socket/socket.handler');
@@ -87,6 +89,94 @@ app.use((req, res) => {
 // ── Global error handler ─────────────────────────────────────
 app.use(errorHandler);
 
+// ── Auto-migrate on startup ──────────────────────────────────
+const SKIP_CODES = new Set(['42P07', '42710', '42P16', '42P17', '42723']);
+
+/**
+ * Split SQL handling dollar-quoted bodies ($$...$$) so semicolons inside
+ * PL/pgSQL blocks are NOT treated as statement separators.
+ */
+function splitStatements(sql) {
+    const stmts = [];
+    let buf = '';
+    let dollarTag = null;
+    let i = 0;
+    while (i < sql.length) {
+        if (sql[i] === '$') {
+            const m = sql.slice(i).match(/^\$([A-Za-z_]*)\$/);
+            if (m) {
+                const tag = m[0];
+                buf += tag;
+                i += tag.length;
+                if (dollarTag === null) dollarTag = tag;
+                else if (tag === dollarTag) dollarTag = null;
+                continue;
+            }
+        }
+        if (dollarTag === null && sql[i] === ';') {
+            const stmt = buf.trim();
+            const hasSQL = stmt.split('\n').some(
+                l => l.trim().length > 0 && !l.trim().startsWith('--'));
+            if (hasSQL) stmts.push(stmt);
+            buf = '';
+            i++;
+            continue;
+        }
+        buf += sql[i++];
+    }
+    const trailing = buf.trim();
+    const trailSQL = trailing.split('\n').some(
+        l => l.trim().length > 0 && !l.trim().startsWith('--'));
+    if (trailSQL) stmts.push(trailing);
+    return stmts;
+}
+
+async function runMigrationsOnStartup() {
+    const migrationsDir = path.join(__dirname, 'migrations');
+    const files = fs.readdirSync(migrationsDir)
+        .filter(f => f.endsWith('.sql'))
+        .sort();
+
+    if (!files.length) return;
+
+    const client = await getPool().connect();
+    try {
+        await client.query('BEGIN');
+        for (const file of files) {
+            logger.info(`📄 Migration: ${file}`);
+            const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+            const statements = splitStatements(sql);
+
+            let ok = 0, skipped = 0;
+            for (let idx = 0; idx < statements.length; idx++) {
+                const stmt = statements[idx];
+                const sp = `sp_auto_${idx}`;
+                try {
+                    await client.query(`SAVEPOINT ${sp}`);
+                    await client.query(stmt);
+                    await client.query(`RELEASE SAVEPOINT ${sp}`);
+                    ok++;
+                } catch (err) {
+                    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+                    await client.query(`RELEASE SAVEPOINT ${sp}`);
+                    if (SKIP_CODES.has(err.code)) {
+                        skipped++;
+                    } else {
+                        logger.warn(`  ⚠️  [${err.code}] ${err.message}`);
+                    }
+                }
+            }
+            logger.info(`  ✅ ${ok} applied  ⏭️  ${skipped} skipped`);
+        }
+        await client.query('COMMIT');
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
+}
+
 // ── Bootstrap ────────────────────────────────────────────────
 async function bootstrap() {
     const isDev = process.env.NODE_ENV !== 'production';
@@ -106,6 +196,14 @@ async function bootstrap() {
         await initDB();
         logger.info('✅ PostgreSQL connected');
         dbAvailable = true;
+
+        // ── Auto-run migrations ─────────────────────────────
+        try {
+            await runMigrationsOnStartup();
+            logger.info('✅ Database migrations applied');
+        } catch (migErr) {
+            logger.warn(`⚠️  Migration warning: ${migErr.message}`);
+        }
     } catch (err) {
         if (!isDev) { logger.error('DB init failed', err); process.exit(1); }
         logger.warn('⚠️  PostgreSQL unavailable – running in DB-less dev mode.');
