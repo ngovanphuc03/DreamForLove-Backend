@@ -69,12 +69,33 @@ app.use(morgan('combined', {
 }));
 
 // ── Health check ─────────────────────────────────────────────
-app.get('/health', (_, res) => {
+app.get('/health', async (_, res) => {
+    let dbStatus = 'unknown';
+    let tables = [];
+    try {
+        const pool = getPool();
+        if (pool) {
+            const result = await pool.query(
+                `SELECT table_name FROM information_schema.tables 
+                 WHERE table_schema = 'public' ORDER BY table_name`
+            );
+            tables = result.rows.map(r => r.table_name);
+            dbStatus = 'connected';
+        } else {
+            dbStatus = 'no pool';
+        }
+    } catch (err) {
+        dbStatus = `error: ${err.message}`;
+    }
+
     res.json({
         status: 'ok',
-        version: '1.0.0',
+        version: '1.0.1',
         time: new Date().toISOString(),
         message: '💕 DreamForLove API is running',
+        env: process.env.NODE_ENV || 'not set',
+        db: dbStatus,
+        tables,
     });
 });
 
