@@ -1,0 +1,119 @@
+const { query } = require('../config/database');
+const { v4: uuidv4 } = require('uuid');
+const { sendPushNotification } = require('../config/firebase');
+const { getIO } = require('../socket/socket.handler');
+
+// GET /api/mood/current
+async function getCurrent(req, res, next) {
+    try {
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
+
+        const result = await query(
+            `SELECT DISTINCT ON (user_id)
+              id, type, note, user_id, couple_room_id, created_at
+       FROM mood_logs
+       WHERE couple_room_id = $1
+         AND created_at >= CURRENT_DATE
+       ORDER BY user_id, created_at DESC`,
+            [roomId]
+        );
+
+        const myMood = result.rows.find(r => r.user_id === userId) ?? null;
+        const partnerMood = result.rows.find(r => r.user_id !== userId) ?? null;
+
+        res.json({ my_mood: myMood, partner_mood: partnerMood });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// GET /api/mood/history?page=1&limit=30
+async function getHistory(req, res, next) {
+    try {
+        const { id: roomId } = req.coupleRoom;
+        const page = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 30));
+        const offset = (page - 1) * limit;
+
+        const countResult = await query(
+            'SELECT COUNT(*)::int AS total FROM mood_logs WHERE couple_room_id = $1',
+            [roomId]
+        );
+        const total = countResult.rows[0].total;
+
+        const result = await query(
+            `SELECT ml.*, u.display_name AS user_name
+       FROM mood_logs ml
+       JOIN users u ON ml.user_id = u.id
+       WHERE ml.couple_room_id = $1
+       ORDER BY ml.created_at DESC
+       LIMIT $2 OFFSET $3`,
+            [roomId, limit, offset]
+        );
+
+        res.json({
+            entries: result.rows,
+            total,
+            page,
+            limit,
+            total_pages: Math.ceil(total / limit),
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// POST /api/mood
+async function create(req, res, next) {
+    try {
+        const { type, note } = req.body;
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
+
+        const result = await query(
+            `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+            [uuidv4(), roomId, userId, type, note || null]
+        );
+
+        const entry = result.rows[0];
+
+        // ── Emit real-time to partner ─────────────────────────
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).except(`user:${userId}`).emit(
+                'partner_mood_update',
+                entry
+            );
+        }
+
+        // ── Push notification if partner offline ──────────────
+        const partnerResult = await query(
+            `SELECT u.fcm_token, u.display_name
+       FROM couple_rooms cr
+       JOIN users u ON (
+         CASE WHEN cr.user_a_id = $1 THEN cr.user_b_id ELSE cr.user_a_id END = u.id
+       )
+       WHERE cr.id = $2`,
+            [userId, roomId]
+        );
+        const partner = partnerResult.rows[0];
+        if (partner?.fcm_token) {
+            const moodEmoji = { happy: '😊', sad: '😢', miss: '🥺', angry: '😤', love: '🥰' };
+            await sendPushNotification({
+                token: partner.fcm_token,
+                title: `${req.dbUser.display_name} ${moodEmoji[type] || '💕'}`,
+                body: `Đang cảm thấy ${type === 'happy' ? 'vui' : type === 'sad' ? 'buồn' : type === 'miss' ? 'nhớ' : type === 'angry' ? 'giận' : 'yêu thương'}`,
+                data: { type: 'MOOD_UPDATE', mood: type },
+            });
+        }
+
+        res.status(201).json(entry);
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { getCurrent, getHistory, create };

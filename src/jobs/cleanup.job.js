@@ -1,0 +1,94 @@
+const cron = require('node-cron');
+const { query } = require('../config/database');
+const logger = require('../config/logger');
+
+/**
+ * Hard-delete couple_rooms (and their child data) that were soft-deleted
+ * more than 30 days ago.
+ *
+ * Schedule: runs every day at 02:00 UTC.
+ */
+function startCleanupJob() {
+    cron.schedule('0 2 * * *', async () => {
+        logger.info('[Cron] Running couple_room hard-delete cleanup…');
+        try {
+            await query('BEGIN');
+
+            // 1. Identify rooms to purge (delete_after has passed)
+            const expired = await query(
+                `SELECT id FROM couple_rooms
+         WHERE status = 'inactive'
+           AND delete_after IS NOT NULL
+           AND delete_after < NOW()`
+            );
+
+            if (!expired.rows.length) {
+                await query('COMMIT');
+                logger.info('[Cron] No rooms to purge.');
+                return;
+            }
+
+            const roomIds = expired.rows.map((r) => r.id);
+            logger.info(`[Cron] Purging ${roomIds.length} room(s): ${roomIds.join(', ')}`);
+
+            // 2. Delete child data in dependency order
+            await query(
+                'DELETE FROM mood_logs     WHERE couple_room_id = ANY($1::uuid[])',
+                [roomIds]
+            );
+            await query(
+                'DELETE FROM wish_items    WHERE couple_room_id = ANY($1::uuid[])',
+                [roomIds]
+            );
+            await query(
+                'DELETE FROM food_items    WHERE couple_room_id = ANY($1::uuid[])',
+                [roomIds]
+            );
+
+            // 3. Delete the rooms themselves
+            const del = await query(
+                'DELETE FROM couple_rooms WHERE id = ANY($1::uuid[]) RETURNING id',
+                [roomIds]
+            );
+
+            await query('COMMIT');
+            logger.info(`[Cron] Purged ${del.rowCount} couple_room(s) and all child data.`);
+        } catch (err) {
+            await query('ROLLBACK').catch(() => { });
+            if (process.env.NODE_ENV !== 'production' && err.code === 'ECONNREFUSED') {
+                return; // DB not available in dev
+            }
+            logger.error(`[Cron] Cleanup job failed: ${err.message}`, { stack: err.stack });
+        }
+    }, {
+        scheduled: true,
+        timezone: 'UTC',
+    });
+
+    logger.info('[Cron] Couple-room cleanup job scheduled (daily 02:00 UTC).');
+}
+
+/**
+ * Purge expired connection_codes (older than 15 minutes).
+ * Runs every 5 minutes.
+ */
+function startCodeCleanupJob() {
+    cron.schedule('*/5 * * * *', async () => {
+        try {
+            const result = await query(
+                "DELETE FROM pairing_codes WHERE expires_at < NOW() RETURNING code"
+            );
+            if (result.rowCount > 0) {
+                logger.info(`[Cron] Purged ${result.rowCount} expired connection code(s).`);
+            }
+        } catch (err) {
+            if (process.env.NODE_ENV !== 'production' && err.code === 'ECONNREFUSED') {
+                // DB not available in dev — skip silently
+                return;
+            }
+            logger.error(`[Cron] Code cleanup failed: ${err.message}`);
+        }
+    });
+}
+
+module.exports = { startCleanupJob, startCodeCleanupJob };

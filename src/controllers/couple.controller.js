@@ -1,0 +1,223 @@
+const { query, transaction } = require('../config/database');
+const { v4: uuidv4 } = require('uuid');
+
+// ── Helper: generate 6-digit code ──────────────────────────────
+function generateCode6() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// ── Default milestones per couple room ────────────────────────
+const DEFAULT_MILESTONES = [
+    { days: 100, label: '100 Ngày', emoji: '🌸' },
+    { days: 200, label: '200 Ngày', emoji: '🌺' },
+    { days: 365, label: '1 Năm', emoji: '💍' },
+    { days: 500, label: '500 Ngày', emoji: '⭐' },
+    { days: 730, label: '2 Năm', emoji: '💎' },
+    { days: 1000, label: '1000 Ngày', emoji: '🏆' },
+    { days: 1825, label: '5 Năm', emoji: '👑' },
+];
+
+// GET /api/couple/me
+async function getMyRoom(req, res, next) {
+    try {
+        const userResult = await query(
+            'SELECT id FROM users WHERE firebase_uid = $1',
+            [req.user.uid]
+        );
+        if (!userResult.rows.length) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const userId = userResult.rows[0].id;
+
+        const roomResult = await query(
+            `SELECT cr.*,
+              ua.display_name AS my_name,
+              ua.photo_url    AS my_photo,
+              ub.display_name AS partner_name,
+              ub.photo_url    AS partner_avatar,
+              CURRENT_DATE - cr.start_date AS days_together
+       FROM couple_rooms cr
+       JOIN users ua ON cr.user_a_id = ua.id
+       LEFT JOIN users ub ON cr.user_b_id = ub.id
+       WHERE (cr.user_a_id = $1 OR cr.user_b_id = $1)
+         AND cr.status = 'active'
+       LIMIT 1`,
+            [userId]
+        );
+
+        if (!roomResult.rows.length) {
+            return res.json({ room: null });
+        }
+
+        res.json({ room: roomResult.rows[0] });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// POST /api/couple/generate-code
+async function generateCode(req, res, next) {
+    try {
+        const userResult = await query(
+            'SELECT id FROM users WHERE firebase_uid = $1',
+            [req.user.uid]
+        );
+        const userId = userResult.rows[0]?.id;
+        if (!userId) return res.status(404).json({ error: 'User not found' });
+
+        // Invalidate existing codes
+        await query(
+            'UPDATE pairing_codes SET used = TRUE WHERE user_id = $1 AND NOT used',
+            [userId]
+        );
+
+        // Generate unique code
+        let code, exists;
+        do {
+            code = generateCode6();
+            const check = await query(
+                'SELECT 1 FROM pairing_codes WHERE code = $1 AND NOT used AND expires_at > NOW()',
+                [code]
+            );
+            exists = check.rows.length > 0;
+        } while (exists);
+
+        await query(
+            `INSERT INTO pairing_codes (id, code, user_id)
+       VALUES ($1, $2, $3)`,
+            [uuidv4(), code, userId]
+        );
+
+        res.json({ code, expires_in_seconds: 900 });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// POST /api/couple/join
+async function joinWithCode(req, res, next) {
+    try {
+        const { code, start_date } = req.body;
+
+        // Fetch user B (the one joining)
+        const userBResult = await query(
+            'SELECT id FROM users WHERE firebase_uid = $1',
+            [req.user.uid]
+        );
+        const userBId = userBResult.rows[0]?.id;
+        if (!userBId) return res.status(404).json({ error: 'User not found' });
+
+        await transaction(async (client) => {
+            // Validate code
+            const codeResult = await client.query(
+                `SELECT * FROM pairing_codes
+         WHERE code = $1 AND NOT used AND expires_at > NOW()`,
+                [code]
+            );
+
+            if (!codeResult.rows.length) {
+                const err = new Error('Mã không hợp lệ hoặc đã hết hạn');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            const pairingCode = codeResult.rows[0];
+            let userAId = pairingCode.user_id;
+
+            // Prevent self-pairing (in dev mode: auto-create a second user)
+            if (userAId === userBId) {
+                if (process.env.NODE_ENV !== 'production') {
+                    // Dev mode: create a fake partner so pairing works
+                    const devPartner = await client.query(
+                        `INSERT INTO users (id, firebase_uid, email, display_name, photo_url, provider)
+                         VALUES ($1, $2, $3, $4, $5, $6)
+                         ON CONFLICT (firebase_uid) DO UPDATE SET display_name = $4
+                         RETURNING id`,
+                        [uuidv4(), 'dev_partner_002', 'partner@dreamforlove.app', 'Người Ấy 💕', null, 'dev']
+                    );
+                    // Re-assign code ownership to the partner
+                    await client.query(
+                        'UPDATE pairing_codes SET user_id = $1 WHERE id = $2',
+                        [devPartner.rows[0].id, pairingCode.id]
+                    );
+                    // Now userA becomes the partner
+                    // eslint-disable-next-line no-param-reassign
+                    userAId = devPartner.rows[0].id;
+                } else {
+                    const err = new Error('Không thể ghép đôi với chính mình!');
+                    err.statusCode = 400;
+                    throw err;
+                }
+            }
+
+            // Mark code as used
+            await client.query(
+                'UPDATE pairing_codes SET used = TRUE WHERE id = $1',
+                [pairingCode.id]
+            );
+
+            // Create couple room
+            const roomId = uuidv4();
+            const roomResult = await client.query(
+                `INSERT INTO couple_rooms (id, user_a_id, user_b_id, start_date)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+                [roomId, userAId, userBId, start_date]
+            );
+            const room = roomResult.rows[0];
+
+            // Insert default milestones
+            for (const m of DEFAULT_MILESTONES) {
+                await client.query(
+                    `INSERT INTO milestones (id, couple_room_id, label, target_days, emoji)
+           VALUES ($1, $2, $3, $4, $5)`,
+                    [uuidv4(), roomId, m.label, m.days, m.emoji]
+                );
+            }
+
+            // Get partner info
+            const partnerResult = await client.query(
+                'SELECT display_name, photo_url FROM users WHERE id = $1',
+                [userAId]
+            );
+            const partner = partnerResult.rows[0];
+
+            return res.json({
+                id: room.id,
+                partner_name: partner?.display_name,
+                partner_avatar: partner?.photo_url,
+                start_date: room.start_date,
+                days_together: Math.floor((Date.now() - new Date(room.start_date).getTime()) / 86400000),
+                is_active: true,
+                is_premium: false,
+            });
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// DELETE /api/couple/me  (Soft delete)
+async function disconnect(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const retentionDays = Number(process.env.DATA_RETENTION_DAYS) || 30;
+
+        await query(
+            `UPDATE couple_rooms SET
+         status         = 'inactive',
+         deactivated_at = NOW(),
+         delete_after   = NOW() + INTERVAL '${retentionDays} days',
+         updated_at     = NOW()
+       WHERE id = $1`,
+            [roomId]
+        );
+
+        res.json({ success: true, message: 'Đã ngắt kết nối. Dữ liệu sẽ được xóa sau 30 ngày.' });
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { getMyRoom, generateCode, joinWithCode, disconnect };

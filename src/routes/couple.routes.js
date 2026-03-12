@@ -1,0 +1,35 @@
+const express = require('express');
+const { body } = require('express-validator');
+const coupleCtrl = require('../controllers/couple.controller');
+const { verifyAuth } = require('../middleware/auth.middleware');
+const { requireCouple } = require('../middleware/couple.middleware');
+const { validateRequest } = require('../middleware/validate.middleware');
+const { codeLimiter } = require('../middleware/rateLimiter');
+
+const router = express.Router();
+
+// All couple routes require authentication
+router.use(verifyAuth);
+
+// GET  /api/couple/me – get current user's couple room info
+router.get('/me', coupleCtrl.getMyRoom);
+
+// POST /api/couple/generate-code – generate 6-digit pairing code
+router.post('/generate-code', coupleCtrl.generateCode);
+
+// POST /api/couple/join – join via pairing code (rate-limited to prevent brute-force)
+router.post(
+    '/join',
+    codeLimiter,
+    [
+        body('code').isLength({ min: 6, max: 6 }).isNumeric(),
+        body('start_date').isISO8601(),
+    ],
+    validateRequest,
+    coupleCtrl.joinWithCode
+);
+
+// DELETE /api/couple/me – soft-delete (disconnect)
+router.delete('/me', requireCouple, coupleCtrl.disconnect);
+
+module.exports = router;
