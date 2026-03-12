@@ -22,7 +22,7 @@ const DEFAULT_MILESTONES = [
 async function getMyRoom(req, res, next) {
     try {
         const userResult = await query(
-            'SELECT id FROM users WHERE firebase_uid = $1',
+            'SELECT id, display_name, photo_url FROM users WHERE firebase_uid = $1',
             [req.user.uid]
         );
         if (!userResult.rows.length) {
@@ -30,6 +30,8 @@ async function getMyRoom(req, res, next) {
         }
 
         const userId = userResult.rows[0].id;
+        const userDisplayName = userResult.rows[0].display_name;
+        const userPhotoUrl = userResult.rows[0].photo_url;
 
         // Get the couple room
         const roomResult = await query(
@@ -68,6 +70,8 @@ async function getMyRoom(req, res, next) {
         res.json({
             room: {
                 id: room.id,
+                user_display_name: userDisplayName || 'Bạn',
+                user_avatar: userPhotoUrl,
                 start_date: room.start_date,
                 days_together: room.days_together,
                 partner_name: partnerName,
@@ -208,7 +212,7 @@ async function joinWithCode(req, res, next) {
             );
             const partner = partnerResult.rows[0];
 
-            // Get user B info to send to user A
+            // Get user B info (current user joining) to send back
             const userBInfoResult = await client.query(
                 'SELECT display_name, photo_url FROM users WHERE id = $1',
                 [userBId]
@@ -229,6 +233,8 @@ async function joinWithCode(req, res, next) {
 
             return res.json({
                 id: room.id,
+                user_display_name: userBInfo?.display_name || 'Bạn',
+                user_avatar: userBInfo?.photo_url,
                 partner_name: partner?.display_name || 'Người ấy 💕',
                 partner_avatar: partner?.photo_url,
                 start_date: room.start_date,
