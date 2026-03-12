@@ -1,5 +1,6 @@
 const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
+const { getIO } = require('../socket/socket.handler');
 
 // ── Helper: generate 6-digit code ──────────────────────────────
 function generateCode6() {
@@ -30,16 +31,11 @@ async function getMyRoom(req, res, next) {
 
         const userId = userResult.rows[0].id;
 
+        // Get the couple room
         const roomResult = await query(
             `SELECT cr.*,
-              ua.display_name AS my_name,
-              ua.photo_url    AS my_photo,
-              ub.display_name AS partner_name,
-              ub.photo_url    AS partner_avatar,
               CURRENT_DATE - cr.start_date AS days_together
        FROM couple_rooms cr
-       JOIN users ua ON cr.user_a_id = ua.id
-       LEFT JOIN users ub ON cr.user_b_id = ub.id
        WHERE (cr.user_a_id = $1 OR cr.user_b_id = $1)
          AND cr.status = 'active'
        LIMIT 1`,
@@ -50,7 +46,36 @@ async function getMyRoom(req, res, next) {
             return res.json({ room: null });
         }
 
-        res.json({ room: roomResult.rows[0] });
+        const room = roomResult.rows[0];
+
+        // Determine partner id (the OTHER user in the room)
+        const partnerId = room.user_a_id === userId ? room.user_b_id : room.user_a_id;
+
+        // Get partner info
+        let partnerName = 'Người ấy 💕';
+        let partnerAvatar = null;
+        if (partnerId) {
+            const partnerResult = await query(
+                'SELECT display_name, photo_url FROM users WHERE id = $1',
+                [partnerId]
+            );
+            if (partnerResult.rows.length) {
+                partnerName = partnerResult.rows[0].display_name || partnerName;
+                partnerAvatar = partnerResult.rows[0].photo_url;
+            }
+        }
+
+        res.json({
+            room: {
+                id: room.id,
+                start_date: room.start_date,
+                days_together: room.days_together,
+                partner_name: partnerName,
+                partner_avatar: partnerAvatar,
+                is_active: room.status === 'active',
+                is_premium: room.is_premium || false,
+            }
+        });
     } catch (err) {
         next(err);
     }
@@ -176,16 +201,35 @@ async function joinWithCode(req, res, next) {
                 );
             }
 
-            // Get partner info
+            // Get partner info (user A - the one who generated the code)
             const partnerResult = await client.query(
                 'SELECT display_name, photo_url FROM users WHERE id = $1',
                 [userAId]
             );
             const partner = partnerResult.rows[0];
 
+            // Get user B info to send to user A
+            const userBInfoResult = await client.query(
+                'SELECT display_name, photo_url FROM users WHERE id = $1',
+                [userBId]
+            );
+            const userBInfo = userBInfoResult.rows[0];
+
+            // Notify user A (code generator) via socket that pairing completed
+            const io = getIO();
+            if (io) {
+                io.to(`user:${userAId}`).emit('pairing:completed', {
+                    roomId: room.id,
+                    partnerId: userBId,
+                    partnerName: userBInfo?.display_name || 'Người ấy 💕',
+                    partnerAvatar: userBInfo?.photo_url,
+                    startDate: room.start_date,
+                });
+            }
+
             return res.json({
                 id: room.id,
-                partner_name: partner?.display_name,
+                partner_name: partner?.display_name || 'Người ấy 💕',
                 partner_avatar: partner?.photo_url,
                 start_date: room.start_date,
                 days_together: Math.floor((Date.now() - new Date(room.start_date).getTime()) / 86400000),
