@@ -30,4 +30,19 @@ router.get('/spin', foodCtrl.spin);
 // DELETE /api/food/:id – remove food item
 router.delete('/:id', foodCtrl.remove);
 
+// PATCH /api/food/:id - update food item
+router.patch(
+    '/:id',
+    [
+        body('name').optional().isString().trim().isLength({ max: 100 }),
+        body('emoji').optional().isString().isLength({ max: 10 }),
+        body('location').optional().isString().trim().isLength({ max: 255 }),
+    ],
+    validateRequest,
+    foodCtrl.update
+);
+
+// PATCH /api/food/:id/eaten - mark food as eaten
+router.patch('/:id/eaten', foodCtrl.markEaten);
+
 module.exports = router;

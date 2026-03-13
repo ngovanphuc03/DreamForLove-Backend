@@ -100,7 +100,9 @@ async function spin(req, res, next) {
             `SELECT fi.*, u.display_name AS added_by_name
        FROM food_items fi
        JOIN users u ON fi.added_by = u.id
-       WHERE fi.couple_room_id = $1 AND fi.is_deleted = FALSE
+       WHERE fi.couple_room_id = $1 
+         AND fi.is_deleted = FALSE
+         AND (fi.is_eaten = FALSE OR fi.last_eaten_at < NOW() - INTERVAL '7 days')
        ORDER BY RANDOM()
        LIMIT 1`,
             [roomId]
@@ -116,4 +118,55 @@ async function spin(req, res, next) {
     }
 }
 
-module.exports = { list, create, remove, spin };
+// PATCH /api/food/:id
+async function update(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { id: roomId } = req.coupleRoom;
+        const { name, emoji, location } = req.body;
+
+        const result = await query(
+            `UPDATE food_items
+             SET name = COALESCE($3, name),
+                 emoji = COALESCE($4, emoji),
+                 location = COALESCE($5, location)
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId, name, emoji, location]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Food item not found' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+// PATCH /api/food/:id/eaten
+async function markEaten(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { id: roomId } = req.coupleRoom;
+        
+        const result = await query(
+            `UPDATE food_items
+             SET is_eaten = TRUE, last_eaten_at = NOW()
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Food item not found' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { list, create, remove, spin, update, markEaten };
