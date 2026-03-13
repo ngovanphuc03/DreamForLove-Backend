@@ -48,20 +48,40 @@ async function sendPushNotification({ token, title, body, data }) {
         return;
     }
     try {
+        // FCM data values MUST all be strings
+        const stringData = Object.fromEntries(
+            Object.entries(data ?? {}).map(([k, v]) => [k, String(v)])
+        );
+
         const message = {
             token,
             notification: { title, body },
-            data: data ?? {},
+            data: stringData,
             android: {
                 priority: 'high',
                 notification: {
+                    channelId: 'heartbeat_channel',
                     sound: 'default',
                     priority: 'high',
+                    defaultVibrateTimings: false,
+                    vibrateTimingsMillis: [0, 400, 200, 400, 200, 800],
+                    defaultLightSettings: false,
+                    lightSettings: {
+                        color: { red: 1.0, green: 0.42, blue: 0.62, alpha: 1.0 },
+                        lightOnDurationMillis: 500,
+                        lightOffDurationMillis: 500,
+                    },
+                    clickAction: 'FLUTTER_NOTIFICATION_CLICK',
                 },
             },
             apns: {
+                headers: { 'apns-priority': '10' },
                 payload: {
-                    aps: { sound: 'default', badge: 1 },
+                    aps: {
+                        sound: 'default',
+                        badge: 1,
+                        contentAvailable: true,
+                    },
                 },
             },
         };

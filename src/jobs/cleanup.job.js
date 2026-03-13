@@ -1,5 +1,5 @@
 const cron = require('node-cron');
-const { query } = require('../config/database');
+const { query, transaction } = require('../config/database');
 const logger = require('../config/logger');
 
 /**
@@ -12,49 +12,46 @@ function startCleanupJob() {
     cron.schedule('0 2 * * *', async () => {
         logger.info('[Cron] Running couple_room hard-delete cleanup…');
         try {
-            await query('BEGIN');
+            await transaction(async (client) => {
+                // 1. Identify rooms to purge (delete_after has passed)
+                const expired = await client.query(
+                    `SELECT id FROM couple_rooms
+             WHERE status = 'inactive'
+               AND delete_after IS NOT NULL
+               AND delete_after < NOW()`
+                );
 
-            // 1. Identify rooms to purge (delete_after has passed)
-            const expired = await query(
-                `SELECT id FROM couple_rooms
-         WHERE status = 'inactive'
-           AND delete_after IS NOT NULL
-           AND delete_after < NOW()`
-            );
+                if (!expired.rows.length) {
+                    logger.info('[Cron] No rooms to purge.');
+                    return;
+                }
 
-            if (!expired.rows.length) {
-                await query('COMMIT');
-                logger.info('[Cron] No rooms to purge.');
-                return;
-            }
+                const roomIds = expired.rows.map((r) => r.id);
+                logger.info(`[Cron] Purging ${roomIds.length} room(s): ${roomIds.join(', ')}`);
 
-            const roomIds = expired.rows.map((r) => r.id);
-            logger.info(`[Cron] Purging ${roomIds.length} room(s): ${roomIds.join(', ')}`);
+                // 2. Delete child data in dependency order
+                await client.query(
+                    'DELETE FROM mood_logs     WHERE couple_room_id = ANY($1::uuid[])',
+                    [roomIds]
+                );
+                await client.query(
+                    'DELETE FROM wish_items    WHERE couple_room_id = ANY($1::uuid[])',
+                    [roomIds]
+                );
+                await client.query(
+                    'DELETE FROM food_items    WHERE couple_room_id = ANY($1::uuid[])',
+                    [roomIds]
+                );
 
-            // 2. Delete child data in dependency order
-            await query(
-                'DELETE FROM mood_logs     WHERE couple_room_id = ANY($1::uuid[])',
-                [roomIds]
-            );
-            await query(
-                'DELETE FROM wish_items    WHERE couple_room_id = ANY($1::uuid[])',
-                [roomIds]
-            );
-            await query(
-                'DELETE FROM food_items    WHERE couple_room_id = ANY($1::uuid[])',
-                [roomIds]
-            );
+                // 3. Delete the rooms themselves
+                const del = await client.query(
+                    'DELETE FROM couple_rooms WHERE id = ANY($1::uuid[]) RETURNING id',
+                    [roomIds]
+                );
 
-            // 3. Delete the rooms themselves
-            const del = await query(
-                'DELETE FROM couple_rooms WHERE id = ANY($1::uuid[]) RETURNING id',
-                [roomIds]
-            );
-
-            await query('COMMIT');
-            logger.info(`[Cron] Purged ${del.rowCount} couple_room(s) and all child data.`);
+                logger.info(`[Cron] Purged ${del.rowCount} couple_room(s) and all child data.`);
+            });
         } catch (err) {
-            await query('ROLLBACK').catch(() => { });
             if (process.env.NODE_ENV !== 'production' && err.code === 'ECONNREFUSED') {
                 return; // DB not available in dev
             }

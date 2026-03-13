@@ -33,4 +33,7 @@ router.patch(
     authCtrl.updateFcmToken
 );
 
+// DELETE /api/auth/account - permanently delete account
+router.delete('/account', verifyAuth, authCtrl.deleteAccount);
+
 module.exports = router;

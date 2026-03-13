@@ -53,7 +53,7 @@ async function getMe(req, res, next) {
 // PATCH /api/auth/fcm-token
 async function updateFcmToken(req, res, next) {
     try {
-        const { token } = req.body;
+        const token = req.body.token || req.body.fcm_token;
 
         await query(
             'UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE firebase_uid = $2',
@@ -66,4 +66,15 @@ async function updateFcmToken(req, res, next) {
     }
 }
 
-module.exports = { login, getMe, updateFcmToken };
+// DELETE /api/auth/account
+async function deleteAccount(req, res, next) {
+    try {
+        const userId = req.dbUser.id;
+        await query('DELETE FROM users WHERE id = $1', [userId]);
+        res.json({ success: true, message: 'Account deleted successfully' });
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { login, getMe, updateFcmToken, deleteAccount };

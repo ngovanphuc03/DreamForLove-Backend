@@ -10,20 +10,7 @@ async function verifyAuth(req, res, next) {
 
     const token = authHeader.substring(7);
 
-    // ── Dev-mode bypass (non-production only) ──────────────────────────────
-    if (process.env.NODE_ENV !== 'production' && token === 'dev_user123') {
-        req.user = { uid: 'dev_user_001', email: 'dev@dreamforlove.app' };
-        try {
-            const result = await query(
-                'SELECT * FROM users WHERE firebase_uid = $1',
-                ['dev_user_001']
-            );
-            if (result.rows.length) req.dbUser = result.rows[0];
-        } catch (err) {
-            return next(err);
-        }
-        return next();
-    }
+
 
     // ── Step 1: Verify Firebase token (auth errors → 401) ──────────────────
     let decoded;
