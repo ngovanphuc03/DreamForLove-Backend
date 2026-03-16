@@ -132,56 +132,9 @@ function initSocket(io) {
         });
 
         // ── Event: typing / heartbeat ping ──────────────────────────────────────
-        socket.on('ping:partner', async () => {
-            if (!socket.coupleRoomId) {
-                logger.warn(`[Socket] ping:partner from ${userId} ignored – no coupleRoomId`);
-                socket.emit('ping:sent', { delivered: false, reason: 'no_room' });
-                return;
-            }
-
-            logger.info(`[Socket] ping:partner from ${userId} in room ${socket.coupleRoomId}`);
-
-            // 1. Emit to online partner via socket room
-            socket.to(`room:${socket.coupleRoomId}`).emit('partner:ping', {
-                userId,
-                displayName: socket.dbUser.display_name,
-            });
-
-            // 2. Push notification for when partner app is backgrounded / killed
-            let pushSent = false;
-            try {
-                // Simpler, reliable query: find the OTHER user in this couple room
-                const partnerResult = await query(
-                    `SELECT u.fcm_token, u.display_name
-                     FROM couple_rooms cr
-                     JOIN users u ON (
-                       (cr.user_a_id = $1 AND cr.user_b_id = u.id) OR
-                       (cr.user_b_id = $1 AND cr.user_a_id = u.id)
-                     )
-                     WHERE cr.id = $2 AND cr.status = 'active'
-                     LIMIT 1`,
-                    [userId, socket.coupleRoomId]
-                );
-
-                const partner = partnerResult.rows[0];
-                logger.info(`[Socket] Partner FCM token: ${partner?.fcm_token ? 'found' : 'NOT FOUND'}`);
-
-                if (partner?.fcm_token) {
-                    await sendPushNotification({
-                        token: partner.fcm_token,
-                        title: `${socket.dbUser.display_name} nhớ bạn 💕`,
-                        body: 'Chạm vào để xem rung tim!',
-                        data: { type: 'HEARTBEAT_PING' },
-                    });
-                    pushSent = true;
-                    logger.info(`[Socket] Push sent to partner of user ${userId}`);
-                }
-            } catch (err) {
-                logger.error(`[Socket] ping:partner push error: ${err.message}`);
-            }
-
-            // 3. Acknowledge back to sender
-            socket.emit('ping:sent', { delivered: true, pushSent });
+        socket.on('ping:partner', () => {
+            if (!socket.coupleRoomId) return;
+            socket.to(`room:${socket.coupleRoomId}`).emit('partner:ping', { userId });
         });
 
         // ── Disconnect ───────────────────────────────────────────────────────────
