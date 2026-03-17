@@ -25,6 +25,7 @@ function getPool() {
             max: 20,
             idleTimeoutMillis: 30_000,
             connectionTimeoutMillis: 5_000,
+            statement_timeout: 10_000, // 10s query timeout to prevent pool exhaustion 
         });
 
         pool.on('error', (err) => {
