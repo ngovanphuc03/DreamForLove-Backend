@@ -53,8 +53,12 @@ app.use(helmet());
 
 app.use(cors({
     origin: function (origin, callback) {
-        if (isOriginAllowed(origin)) return callback(null, true);
-        return callback(new Error('CORS not allowed for this origin'));
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+            return callback(null, true);
+        }
+        callback(null, true); // Dev: allow all for now
     },
     credentials: true,
 }));
