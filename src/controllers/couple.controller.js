@@ -1,10 +1,11 @@
 const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
+const { randomInt } = require('crypto');
 const { getIO } = require('../socket/socket.handler');
 
 // ── Helper: generate 6-digit code ──────────────────────────────
 function generateCode6() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(100000, 1000000).toString();
 }
 
 // ── Default milestones per couple room ────────────────────────
@@ -260,6 +261,7 @@ async function joinWithCode(req, res, next) {
 async function disconnect(req, res, next) {
     try {
         const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
         const retentionDays = Number(process.env.DATA_RETENTION_DAYS) || 30;
 
         await query(
@@ -271,6 +273,15 @@ async function disconnect(req, res, next) {
        WHERE id = $1`,
             [roomId, retentionDays]
         );
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('couple:disconnected', {
+                roomId,
+                byUserId: userId,
+                at: new Date().toISOString(),
+            });
+        }
 
         res.json({ success: true, message: 'Đã ngắt kết nối. Dữ liệu sẽ được xóa sau 30 ngày.' });
     } catch (err) {
@@ -296,7 +307,7 @@ async function createMilestone(req, res, next) {
     try {
         const roomId = req.coupleRoom.id;
         const { label, target_days, emoji } = req.body;
-        
+
         const result = await query(
             `INSERT INTO milestones (id, couple_room_id, label, target_days, emoji, is_custom)
              VALUES ($1, $2, $3, $4, $5, TRUE)
@@ -345,7 +356,7 @@ async function deleteMilestone(req, res, next) {
     }
 }
 
-module.exports = { 
+module.exports = {
     getMyRoom, generateCode, joinWithCode, disconnect,
     getMilestones, createMilestone, updateMilestone, deleteMilestone
 };
