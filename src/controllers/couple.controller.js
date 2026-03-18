@@ -101,22 +101,30 @@ async function generateCode(req, res, next) {
             [userId]
         );
 
-        // Generate unique code
-        let code, exists;
-        do {
-            code = generateCode6();
-            const check = await query(
-                'SELECT 1 FROM pairing_codes WHERE code = $1 AND NOT used AND expires_at > NOW()',
-                [code]
-            );
-            exists = check.rows.length > 0;
-        } while (exists);
+        // Generate unique code and insert securely to avoid race conditions
+        let code;
+        let inserted = false;
+        let retries = 0;
+        const maxRetries = 5;
 
-        await query(
-            `INSERT INTO pairing_codes (id, code, user_id)
-       VALUES ($1, $2, $3)`,
-            [uuidv4(), code, userId]
-        );
+        while (!inserted && retries < maxRetries) {
+            code = generateCode6();
+            const insertResult = await query(
+                `INSERT INTO pairing_codes (id, code, user_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (code) DO NOTHING
+                 RETURNING id`,
+                [uuidv4(), code, userId]
+            );
+            if (insertResult.rowCount > 0) {
+                inserted = true;
+            }
+            retries++;
+        }
+
+        if (!inserted) {
+            throw new Error('Could not generate a unique pairing code. Please try again.');
+        }
 
         res.json({ code, expires_in_seconds: 900 });
     } catch (err) {
@@ -258,10 +266,10 @@ async function disconnect(req, res, next) {
             `UPDATE couple_rooms SET
          status         = 'inactive',
          deactivated_at = NOW(),
-         delete_after   = NOW() + INTERVAL '${retentionDays} days',
+         delete_after   = NOW() + INTERVAL '1 day' * $2,
          updated_at     = NOW()
        WHERE id = $1`,
-            [roomId]
+            [roomId, retentionDays]
         );
 
         res.json({ success: true, message: 'Đã ngắt kết nối. Dữ liệu sẽ được xóa sau 30 ngày.' });
@@ -270,4 +278,74 @@ async function disconnect(req, res, next) {
     }
 }
 
-module.exports = { getMyRoom, generateCode, joinWithCode, disconnect };
+// ── Milestones CRUD ──────────────────────────────────────────────
+async function getMilestones(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const result = await query(
+            'SELECT * FROM milestones WHERE couple_room_id = $1 ORDER BY target_days ASC',
+            [roomId]
+        );
+        res.json({ milestones: result.rows });
+    } catch (err) {
+        next(err);
+    }
+}
+
+async function createMilestone(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const { label, target_days, emoji } = req.body;
+        
+        const result = await query(
+            `INSERT INTO milestones (id, couple_room_id, label, target_days, emoji, is_custom)
+             VALUES ($1, $2, $3, $4, $5, TRUE)
+             RETURNING *`,
+            [uuidv4(), roomId, label, target_days, emoji || '🎯']
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+async function updateMilestone(req, res, next) {
+    try {
+        const { id } = req.params;
+        const roomId = req.coupleRoom.id;
+        const { label, target_days, emoji } = req.body;
+
+        const result = await query(
+            `UPDATE milestones
+             SET label = COALESCE($3, label),
+                 target_days = COALESCE($4, target_days),
+                 emoji = COALESCE($5, emoji)
+             WHERE id = $1 AND couple_room_id = $2
+             RETURNING *`,
+            [id, roomId, label, target_days, emoji]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Milestone not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+async function deleteMilestone(req, res, next) {
+    try {
+        const { id } = req.params;
+        const roomId = req.coupleRoom.id;
+        await query('DELETE FROM milestones WHERE id = $1 AND couple_room_id = $2', [id, roomId]);
+        res.json({ success: true });
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { 
+    getMyRoom, generateCode, joinWithCode, disconnect,
+    getMilestones, createMilestone, updateMilestone, deleteMilestone
+};

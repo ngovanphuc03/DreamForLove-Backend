@@ -67,15 +67,15 @@ async function getHistory(req, res, next) {
 // POST /api/mood
 async function create(req, res, next) {
     try {
-        const { type, note } = req.body;
+        const { type, note, audio_url } = req.body;
         const { id: roomId } = req.coupleRoom;
         const userId = req.dbUser.id;
 
         const result = await query(
-            `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note)
-       VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note, audio_url)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-            [uuidv4(), roomId, userId, type, note || null]
+            [uuidv4(), roomId, userId, type, note || null, audio_url || null]
         );
 
         const entry = result.rows[0];
@@ -101,10 +101,11 @@ async function create(req, res, next) {
         );
         const partner = partnerResult.rows[0];
         if (partner?.fcm_token) {
+            const senderName = req.dbUser?.display_name || 'Bạn ơi';
             const moodEmoji = { happy: '😊', sad: '😢', miss: '🥺', angry: '😤', love: '🥰' };
             await sendPushNotification({
                 token: partner.fcm_token,
-                title: `${req.dbUser.display_name} ${moodEmoji[type] || '💕'}`,
+                title: `${senderName} ${moodEmoji[type] || '💕'}`,
                 body: `Đang cảm thấy ${type === 'happy' ? 'vui' : type === 'sad' ? 'buồn' : type === 'miss' ? 'nhớ' : type === 'angry' ? 'giận' : 'yêu thương'}`,
                 data: { type: 'MOOD_UPDATE', mood: type },
             });
