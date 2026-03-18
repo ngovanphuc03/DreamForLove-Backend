@@ -1,4 +1,4 @@
-const { verifyIdToken } = require('../config/firebase');
+const { verifyIdToken, sendPushNotification } = require('../config/firebase');
 const { query } = require('../config/database');
 const logger = require('../config/logger');
 
@@ -131,10 +131,102 @@ function initSocket(io) {
             socket.to(`room:${socket.coupleRoomId}`).emit('food:sync', { action, item });
         });
 
+        // ── Event: request partner presence snapshot ───────────────────────────
+        socket.on('partner:presence:request', async () => {
+            try {
+                if (!socket.coupleRoomId) {
+                    return socket.emit('partner:presence', {
+                        online: false,
+                        reason: 'no_room',
+                    });
+                }
+
+                const partnerResult = await query(
+                    `SELECT u.id, u.display_name
+                     FROM couple_rooms cr
+                     JOIN users u ON (
+                       (cr.user_a_id = $1 AND cr.user_b_id = u.id) OR
+                       (cr.user_b_id = $1 AND cr.user_a_id = u.id)
+                     )
+                     WHERE cr.id = $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [userId, socket.coupleRoomId]
+                );
+
+                const partner = partnerResult.rows[0];
+                if (!partner) {
+                    return socket.emit('partner:presence', {
+                        online: false,
+                        reason: 'partner_not_found',
+                    });
+                }
+
+                socket.emit('partner:presence', {
+                    online: isUserOnline(partner.id),
+                    userId: partner.id,
+                    displayName: partner.display_name,
+                });
+            } catch (err) {
+                logger.error(`[Socket] partner:presence:request error: ${err.message}`);
+            }
+        });
+
         // ── Event: typing / heartbeat ping ──────────────────────────────────────
-        socket.on('ping:partner', () => {
-            if (!socket.coupleRoomId) return;
-            socket.to(`room:${socket.coupleRoomId}`).emit('partner:ping', { userId });
+        socket.on('ping:partner', async () => {
+            if (!socket.coupleRoomId) {
+                logger.warn(`[Socket] ping:partner from ${userId} ignored – no coupleRoomId`);
+                socket.emit('ping:sent', { delivered: false, reason: 'no_room' });
+                return;
+            }
+
+            logger.info(`[Socket] ping:partner from ${userId} in room ${socket.coupleRoomId}`);
+
+            // 1. Emit to online partner via socket room
+            socket.to(`room:${socket.coupleRoomId}`).emit('partner:ping', {
+                userId,
+                displayName: socket.dbUser.display_name,
+            });
+
+            // 2. Push notification for when partner app is backgrounded / killed
+            let pushSent = false;
+            let pushReason = 'unknown';
+            try {
+                // Simpler, reliable query: find the OTHER user in this couple room
+                const partnerResult = await query(
+                    `SELECT u.fcm_token, u.display_name
+                     FROM couple_rooms cr
+                     JOIN users u ON (
+                       (cr.user_a_id = $1 AND cr.user_b_id = u.id) OR
+                       (cr.user_b_id = $1 AND cr.user_a_id = u.id)
+                     )
+                     WHERE cr.id = $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [userId, socket.coupleRoomId]
+                );
+
+                const partner = partnerResult.rows[0];
+                logger.info(`[Socket] Partner FCM token: ${partner?.fcm_token ? 'found' : 'NOT FOUND'}`);
+
+                if (partner?.fcm_token) {
+                    await sendPushNotification({
+                        token: partner.fcm_token,
+                        title: `${socket.dbUser.display_name} nhớ bạn 💕`,
+                        body: 'Chạm vào để xem rung tim!',
+                        data: { type: 'HEARTBEAT_PING' },
+                    });
+                    pushSent = true;
+                    pushReason = 'sent';
+                    logger.info(`[Socket] Push sent to partner of user ${userId}`);
+                } else {
+                    pushReason = 'missing_fcm_token';
+                }
+            } catch (err) {
+                pushReason = 'push_error';
+                logger.error(`[Socket] ping:partner push error: ${err.message}`);
+            }
+
+            // 3. Acknowledge back to sender
+            socket.emit('ping:sent', { delivered: true, pushSent, pushReason });
         });
 
         // ── Disconnect ───────────────────────────────────────────────────────────
@@ -162,5 +254,26 @@ function initSocket(io) {
 function isUserOnline(userId) {
     return onlineUsers.has(userId) && onlineUsers.get(userId).size > 0;
 }
+
+// ── Zombie Connection Cleanup ─────────────────────────────────────────────
+setInterval(() => {
+    if (!ioInstance) return;
+    let cleaned = 0;
+    for (const [userId, sockets] of onlineUsers.entries()) {
+        for (const socketId of sockets) {
+            // Check if socket actually exists in the IO instance
+            if (!ioInstance.sockets.sockets.has(socketId)) {
+                sockets.delete(socketId);
+                cleaned++;
+            }
+        }
+        if (sockets.size === 0) {
+            onlineUsers.delete(userId);
+        }
+    }
+    if (cleaned > 0) {
+        logger.debug(`[Socket] Periodic Cleanup: Removed ${cleaned} zombie connections.`);
+    }
+}, 60000); // 1 minute
 
 module.exports = { initSocket, isUserOnline, getIO };

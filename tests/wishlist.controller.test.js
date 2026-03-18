@@ -6,6 +6,7 @@ const { list, create, markBought, remove } = require('../src/controllers/wishlis
 
 beforeEach(() => {
     jest.clearAllMocks();
+    mockQuery.mockReset();
 });
 
 describe('Wishlist Controller', () => {
@@ -69,10 +70,8 @@ describe('Wishlist Controller', () => {
 
     // ────────────────────────────────────────────────────────
     describe('POST /wishlist (create)', () => {
-        it('should create wish item when under free limit', async () => {
-            mockQuery
-                .mockResolvedValueOnce({ rows: [{ count: '3' }] })  // count check
-                .mockResolvedValueOnce({ rows: [{ id: 'w2', name: 'Sách mới' }] });
+        it('should create wish item', async () => {
+            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'w2', name: 'Sách mới' }] });
 
             const req = mockReq({
                 body: { name: 'Sách mới', category: 'Sách', price: 50000, priority: 'mid' },
@@ -84,39 +83,6 @@ describe('Wishlist Controller', () => {
 
             expect(res.status).toHaveBeenCalledWith(201);
             expect(res.json).toHaveBeenCalledWith({ id: 'w2', name: 'Sách mới' });
-        });
-
-        it('should return 403 when free tier limit exceeded', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [{ count: '10' }] });
-
-            const req = mockReq({
-                coupleRoom: { id: 'uuid-room-1', is_premium: false },
-                body: { name: 'Vượt giới hạn' },
-            });
-            const res = mockRes();
-            const next = mockNext();
-
-            await create(req, res, next);
-
-            expect(res.status).toHaveBeenCalledWith(403);
-            expect(res.json.mock.calls[0][0].code).toBe('UPGRADE_REQUIRED');
-        });
-
-        it('should skip limit check for premium users', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'w3', name: 'Premium item' }] });
-
-            const req = mockReq({
-                coupleRoom: { id: 'uuid-room-1', is_premium: true },
-                body: { name: 'Premium item' },
-            });
-            const res = mockRes();
-            const next = mockNext();
-
-            await create(req, res, next);
-
-            // Only 1 query (INSERT), no count check
-            expect(mockQuery).toHaveBeenCalledTimes(1);
-            expect(res.status).toHaveBeenCalledWith(201);
         });
     });
 

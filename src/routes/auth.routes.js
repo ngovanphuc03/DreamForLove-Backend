@@ -28,9 +28,20 @@ router.get('/me', verifyAuth, authCtrl.getMe);
 router.patch(
     '/fcm-token',
     verifyAuth,
-    [body('token').notEmpty().isString()],
+    [
+        body().custom((value) => {
+            const token = value?.token || value?.fcm_token;
+            if (typeof token !== 'string' || token.trim().length === 0) {
+                throw new Error('token is required');
+            }
+            return true;
+        }),
+    ],
     validateRequest,
     authCtrl.updateFcmToken
 );
+
+// DELETE /api/auth/account - permanently delete account
+router.delete('/account', verifyAuth, authCtrl.deleteAccount);
 
 module.exports = router;

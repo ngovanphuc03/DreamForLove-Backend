@@ -21,10 +21,27 @@ const logger = require('./config/logger');
 
 const app = express();
 const server = http.createServer(app);
+
+const isDevEnv = process.env.NODE_ENV !== 'production';
+const allowedOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+    : ['http://localhost:8080', 'http://localhost:3000', 'http://localhost:5000'];
+
+function isOriginAllowed(origin) {
+    // Allow requests with no origin (mobile apps, curl, health checks)
+    if (!origin) return true;
+
+    // In dev, allow wildcard if explicitly configured
+    if (isDevEnv && allowedOrigins.includes('*')) return true;
+
+    return allowedOrigins.includes(origin);
+}
+
 const io = new SocketServer(server, {
     cors: {
         origin: function (origin, callback) {
-            callback(null, true); // Allow all origins in dev
+            if (isOriginAllowed(origin)) return callback(null, true);
+            return callback(new Error('Socket CORS not allowed for this origin'));
         },
         credentials: true,
     },
@@ -34,18 +51,10 @@ const io = new SocketServer(server, {
 // ── Security ─────────────────────────────────────────────────
 app.use(helmet());
 
-const allowedOrigins = process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',')
-    : ['http://localhost:8080', 'http://localhost:3000', 'http://localhost:5000'];
-
 app.use(cors({
     origin: function (origin, callback) {
-        // Allow requests with no origin (mobile apps, curl, etc.)
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-            return callback(null, true);
-        }
-        callback(null, true); // Dev: allow all for now
+        if (isOriginAllowed(origin)) return callback(null, true);
+        return callback(new Error('CORS not allowed for this origin'));
     },
     credentials: true,
 }));
