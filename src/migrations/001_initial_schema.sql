@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS mood_logs (
     user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     type            mood_type   NOT NULL,
     note            TEXT,
+    audio_url       TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 

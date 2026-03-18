@@ -1,12 +1,12 @@
 const { query } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 
-const FREE_LIMIT = Number(process.env.FREE_WISHLIST_LIMIT) || 10;
+// Premium limits removed — all features free for everyone
 
 // GET /api/wishlist?page=1&limit=20
 async function list(req, res, next) {
     try {
-        const { id: roomId, is_premium } = req.coupleRoom;
+        const { id: roomId } = req.coupleRoom;
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
         const offset = (page - 1) * limit;
@@ -34,13 +34,13 @@ async function list(req, res, next) {
 
         res.json({
             items: result.rows,
-            is_premium: is_premium,
+            is_premium: true,
             count: result.rows.length,
             total,
             page,
             limit,
             total_pages: Math.ceil(total / limit),
-            free_limit: is_premium ? null : FREE_LIMIT,
+            free_limit: null,
         });
     } catch (err) {
         next(err);
@@ -50,22 +50,8 @@ async function list(req, res, next) {
 // POST /api/wishlist
 async function create(req, res, next) {
     try {
-        const { id: roomId, is_premium } = req.coupleRoom;
+        const { id: roomId } = req.coupleRoom;
         const { name, category, price, priority, image_url, product_url } = req.body;
-
-        // Enforce free tier limit
-        if (!is_premium) {
-            const countResult = await query(
-                'SELECT COUNT(*) FROM wish_items WHERE couple_room_id = $1 AND is_deleted = FALSE',
-                [roomId]
-            );
-            if (Number(countResult.rows[0].count) >= FREE_LIMIT) {
-                return res.status(403).json({
-                    error: `Free plan chỉ cho ${FREE_LIMIT} món quà. Nâng cấp Premium!`,
-                    code: 'UPGRADE_REQUIRED',
-                });
-            }
-        }
 
         const result = await query(
             `INSERT INTO wish_items
@@ -96,13 +82,16 @@ async function markBought(req, res, next) {
     try {
         const { id } = req.params;
         const { id: roomId } = req.coupleRoom;
+        const desiredBought = req.body?.is_bought === false ? false : true;
 
         const result = await query(
             `UPDATE wish_items
-       SET is_bought = TRUE, bought_at = NOW(), updated_at = NOW()
+       SET is_bought = $3,
+           bought_at = CASE WHEN $3 THEN NOW() ELSE NULL END,
+           updated_at = NOW()
        WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
        RETURNING *`,
-            [id, roomId]
+            [id, roomId, desiredBought]
         );
 
         if (!result.rows.length) {
@@ -134,4 +123,35 @@ async function remove(req, res, next) {
     }
 }
 
-module.exports = { list, create, markBought, remove };
+// PATCH /api/wishlist/:id
+async function update(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { id: roomId } = req.coupleRoom;
+        const { name, category, price, priority, image_url, product_url } = req.body;
+
+        const result = await query(
+            `UPDATE wish_items
+             SET name = COALESCE($3, name),
+                 category = COALESCE($4, category),
+                 price = COALESCE($5, price),
+                 priority = COALESCE($6, priority),
+                 image_url = COALESCE($7, image_url),
+                 product_url = COALESCE($8, product_url),
+                 updated_at = NOW()
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId, name, category, price, priority, image_url, product_url]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Wish item not found' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { list, create, markBought, remove, update };

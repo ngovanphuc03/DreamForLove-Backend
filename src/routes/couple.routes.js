@@ -32,4 +32,30 @@ router.post(
 // DELETE /api/couple/me – soft-delete (disconnect)
 router.delete('/me', requireCouple, coupleCtrl.disconnect);
 
+// ── Milestones ──────────────────────────────────────────────────
+router.get('/milestones', requireCouple, coupleCtrl.getMilestones);
+router.post(
+    '/milestones',
+    requireCouple,
+    [
+        body('label').notEmpty().isString().trim(),
+        body('target_days').isInt({ min: 1 }),
+        body('emoji').optional().isString().trim()
+    ],
+    validateRequest,
+    coupleCtrl.createMilestone
+);
+router.patch(
+    '/milestones/:id',
+    requireCouple,
+    [
+        body('label').optional().isString().trim(),
+        body('target_days').optional().isInt({ min: 1 }),
+        body('emoji').optional().isString().trim()
+    ],
+    validateRequest,
+    coupleCtrl.updateMilestone
+);
+router.delete('/milestones/:id', requireCouple, coupleCtrl.deleteMilestone);
+
 module.exports = router;
