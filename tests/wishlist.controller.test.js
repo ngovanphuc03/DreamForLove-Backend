@@ -141,9 +141,7 @@ describe('Wishlist Controller', () => {
     // ────────────────────────────────────────────────────────
     describe('DELETE /wishlist/:id', () => {
         it('should soft-delete item', async () => {
-            mockQuery
-                .mockResolvedValueOnce({ rows: [{ id: 'w1', name: 'Gấu bông' }] })
-                .mockResolvedValueOnce({});
+            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'w1', name: 'Gấu bông', is_deleted: true }] });
 
             const req = mockReq({ params: { id: 'w1' } });
             const res = mockRes();
@@ -151,8 +149,20 @@ describe('Wishlist Controller', () => {
 
             await remove(req, res, next);
 
-            expect(mockQuery.mock.calls[1][0]).toMatch(/is_deleted = TRUE/);
+            expect(mockQuery.mock.calls[0][0]).toMatch(/is_deleted = TRUE/);
             expect(res.json).toHaveBeenCalledWith({ success: true });
+        });
+
+        it('should return 404 when item not found', async () => {
+            mockQuery.mockResolvedValueOnce({ rows: [] });
+
+            const req = mockReq({ params: { id: 'invalid' } });
+            const res = mockRes();
+            const next = mockNext();
+
+            await remove(req, res, next);
+
+            expect(res.status).toHaveBeenCalledWith(404);
         });
     });
 });
