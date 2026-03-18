@@ -179,6 +179,29 @@ function initSocket(io) {
                 return;
             }
 
+            // Validate room is still active and this user is still a member.
+            try {
+                const activeRoom = await query(
+                    `SELECT 1 FROM couple_rooms
+                     WHERE id = $1
+                       AND status = 'active'
+                       AND (user_a_id = $2 OR user_b_id = $2)
+                     LIMIT 1`,
+                    [socket.coupleRoomId, userId]
+                );
+                if (!activeRoom.rows.length) {
+                    logger.warn(`[Socket] ping:partner from ${userId} ignored – inactive/unauthorized room ${socket.coupleRoomId}`);
+                    socket.leave(`room:${socket.coupleRoomId}`);
+                    socket.coupleRoomId = null;
+                    socket.emit('ping:sent', { delivered: false, reason: 'inactive_room' });
+                    return;
+                }
+            } catch (err) {
+                logger.error(`[Socket] ping:partner room validation error: ${err.message}`);
+                socket.emit('ping:sent', { delivered: false, reason: 'room_validation_failed' });
+                return;
+            }
+
             logger.info(`[Socket] ping:partner from ${userId} in room ${socket.coupleRoomId}`);
 
             // 1. Emit to online partner via socket room
