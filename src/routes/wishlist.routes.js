@@ -28,9 +28,31 @@ router.post(
 );
 
 // PATCH /api/wishlist/:id/bought – mark as bought
-router.patch('/:id/bought', wishCtrl.markBought);
+router.patch(
+    '/:id/bought',
+    [
+        body('is_bought').optional().isBoolean(),
+    ],
+    validateRequest,
+    wishCtrl.markBought
+);
 
 // DELETE /api/wishlist/:id – soft delete
 router.delete('/:id', wishCtrl.remove);
+
+// PATCH /api/wishlist/:id - update wish item
+router.patch(
+    '/:id',
+    [
+        body('name').optional().isString().trim().isLength({ max: 255 }),
+        body('category').optional().isString().trim(),
+        body('price').optional().isFloat({ min: 0 }),
+        body('priority').optional().isIn(['low', 'mid', 'high']),
+        body('image_url').optional().isURL(),
+        body('product_url').optional().isURL(),
+    ],
+    validateRequest,
+    wishCtrl.update
+);
 
 module.exports = router;

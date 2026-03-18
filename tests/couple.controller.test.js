@@ -6,6 +6,8 @@ const { getMyRoom, generateCode, joinWithCode, disconnect } = require('../src/co
 
 beforeEach(() => {
     jest.clearAllMocks();
+    mockQuery.mockReset();
+    mockTransaction.mockReset();
 });
 
 // ────────────────────────────────────────────────────────────
@@ -15,14 +17,16 @@ describe('getMyRoom', () => {
             id: 'room-1',
             user_a_id: 'u1',
             user_b_id: 'u2',
+            status: 'active',
             start_date: '2024-01-01',
             my_name: 'Alice',
             partner_name: 'Bob',
             days_together: 100,
         };
         mockQuery
-            .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })  // user lookup
-            .mockResolvedValueOnce({ rows: [room] });           // room lookup
+            .mockResolvedValueOnce({ rows: [{ id: 'u1', display_name: 'Alice', photo_url: null }] })  // user lookup
+            .mockResolvedValueOnce({ rows: [room] })           // room lookup
+            .mockResolvedValueOnce({ rows: [{ display_name: 'Bob', photo_url: null }] }); // partner lookup
 
         const req = mockReq();
         const res = mockRes();
@@ -30,7 +34,14 @@ describe('getMyRoom', () => {
 
         await getMyRoom(req, res, next);
 
-        expect(res.json).toHaveBeenCalledWith({ room });
+        expect(res.json).toHaveBeenCalledWith({
+            room: expect.objectContaining({
+                id: 'room-1',
+                user_display_name: 'Alice',
+                partner_name: 'Bob',
+                is_active: true,
+            })
+        });
     });
 
     it('should return room:null when user has no couple room', async () => {
@@ -66,8 +77,7 @@ describe('generateCode', () => {
         mockQuery
             .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })   // user lookup
             .mockResolvedValueOnce({ rows: [] })                 // invalidate old codes
-            .mockResolvedValueOnce({ rows: [] })                 // check uniqueness (no collision)
-            .mockResolvedValueOnce({ rows: [] });                // INSERT pairing_code
+            .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'pc-1' }] }); // insert pairing_code
 
         const req = mockReq();
         const res = mockRes();
@@ -110,7 +120,7 @@ describe('disconnect', () => {
         );
         expect(mockQuery).toHaveBeenCalledWith(
             expect.stringContaining("status         = 'inactive'"),
-            ['room-1']
+            ['room-1', 30]
         );
     });
 

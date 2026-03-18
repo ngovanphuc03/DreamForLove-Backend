@@ -45,29 +45,62 @@ async function verifyIdToken(token) {
 async function sendPushNotification({ token, title, body, data }) {
     if (devMode) {
         logger.debug(`[FCM stub] → token=${token} title="${title}" body="${body}"`);
-        return;
+        return true;
     }
+
+    // FCM data values MUST all be strings
+    const stringData = Object.fromEntries(
+        Object.entries(data ?? {}).map(([k, v]) => [k, String(v)])
+    );
+
+    // NOTE: Do not pass vibrateTimingsMillis here.
+    // Some environments/SDK combinations may reject array payloads.
+    // Vibration behavior is controlled by Android notification channel on client.
+    const primaryMessage = {
+        token,
+        notification: { title, body },
+        data: stringData,
+        android: {
+            priority: 'high',
+            notification: {
+                channelId: 'heartbeat_channel',
+                sound: 'default',
+                priority: 'high',
+                clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+            },
+        },
+        apns: {
+            headers: { 'apns-priority': '10' },
+            payload: {
+                aps: {
+                    sound: 'default',
+                    badge: 1,
+                    contentAvailable: true,
+                },
+            },
+        },
+    };
+
     try {
-        const message = {
+        await admin.messaging().send(primaryMessage);
+        return true;
+    } catch (err) {
+        logger.error(`[FCM] primary send failed: code=${err.code || 'unknown'} message=${err.message}`);
+    }
+
+    // Fallback payload (minimal) to maximize deliverability.
+    try {
+        const fallbackMessage = {
             token,
             notification: { title, body },
-            data: data ?? {},
-            android: {
-                priority: 'high',
-                notification: {
-                    sound: 'default',
-                    priority: 'high',
-                },
-            },
-            apns: {
-                payload: {
-                    aps: { sound: 'default', badge: 1 },
-                },
-            },
+            data: stringData,
         };
-        await admin.messaging().send(message);
+        await admin.messaging().send(fallbackMessage);
+        logger.warn('[FCM] Sent using fallback payload');
+        return true;
     } catch (err) {
-        logger.error('Push notification error:', err);
+        logger.error(`[FCM] fallback send failed: code=${err.code || 'unknown'} message=${err.message}`);
+        return false;
     }
 }
 

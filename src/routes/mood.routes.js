@@ -21,6 +21,7 @@ router.post(
     [
         body('type').isIn(['happy', 'sad', 'miss', 'angry', 'love']),
         body('note').optional().isString().trim().isLength({ max: 500 }),
+        body('audio_url').optional().isURL(),
     ],
     validateRequest,
     moodCtrl.create

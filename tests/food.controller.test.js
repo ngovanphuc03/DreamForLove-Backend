@@ -6,6 +6,7 @@ const { list, create, remove, spin } = require('../src/controllers/food.controll
 
 beforeEach(() => {
     jest.clearAllMocks();
+    mockQuery.mockReset();
 });
 
 describe('Food Controller', () => {
@@ -53,9 +54,8 @@ describe('Food Controller', () => {
 
     // ────────────────────────────────────────────────────────
     describe('POST /food (create)', () => {
-        it('should create food item when under free limit', async () => {
+        it('should create food item', async () => {
             mockQuery
-                .mockResolvedValueOnce({ rows: [{ count: '3' }] })
                 .mockResolvedValueOnce({ rows: [{ id: 'f3', name: 'Bún bò' }] });
 
             const req = mockReq({
@@ -68,41 +68,14 @@ describe('Food Controller', () => {
 
             expect(res.status).toHaveBeenCalledWith(201);
         });
-
-        it('should enforce free tier limit', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [{ count: '5' }] });
-
-            const req = mockReq({ body: { name: 'Too many' } });
-            const res = mockRes();
-            const next = mockNext();
-
-            await create(req, res, next);
-
-            expect(res.status).toHaveBeenCalledWith(403);
-            expect(res.json.mock.calls[0][0].code).toBe('UPGRADE_REQUIRED');
-        });
-
-        it('should skip limit for premium', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'f4' }] });
-
-            const req = mockReq({
-                coupleRoom: { id: 'uuid-room-1', is_premium: true },
-                body: { name: 'Premium food' },
-            });
-            const res = mockRes();
-            const next = mockNext();
-
-            await create(req, res, next);
-
-            expect(mockQuery).toHaveBeenCalledTimes(1);
-            expect(res.status).toHaveBeenCalledWith(201);
-        });
     });
 
     // ────────────────────────────────────────────────────────
     describe('DELETE /food/:id', () => {
         it('should soft-delete food item', async () => {
-            mockQuery.mockResolvedValueOnce({});
+            mockQuery
+                .mockResolvedValueOnce({ rows: [{ id: 'f1', name: 'Phở' }] })
+                .mockResolvedValueOnce({});
 
             const req = mockReq({ params: { id: 'f1' } });
             const res = mockRes();
@@ -110,7 +83,7 @@ describe('Food Controller', () => {
 
             await remove(req, res, next);
 
-            expect(mockQuery.mock.calls[0][0]).toMatch(/is_deleted = TRUE/);
+            expect(mockQuery.mock.calls[1][0]).toMatch(/is_deleted = TRUE/);
             expect(res.json).toHaveBeenCalledWith({ success: true });
         });
     });

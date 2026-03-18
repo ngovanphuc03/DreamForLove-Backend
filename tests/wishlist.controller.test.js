@@ -6,6 +6,7 @@ const { list, create, markBought, remove } = require('../src/controllers/wishlis
 
 beforeEach(() => {
     jest.clearAllMocks();
+    mockQuery.mockReset();
 });
 
 describe('Wishlist Controller', () => {
@@ -69,10 +70,8 @@ describe('Wishlist Controller', () => {
 
     // ────────────────────────────────────────────────────────
     describe('POST /wishlist (create)', () => {
-        it('should create wish item when under free limit', async () => {
-            mockQuery
-                .mockResolvedValueOnce({ rows: [{ count: '3' }] })  // count check
-                .mockResolvedValueOnce({ rows: [{ id: 'w2', name: 'Sách mới' }] });
+        it('should create wish item', async () => {
+            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'w2', name: 'Sách mới' }] });
 
             const req = mockReq({
                 body: { name: 'Sách mới', category: 'Sách', price: 50000, priority: 'mid' },
@@ -84,39 +83,6 @@ describe('Wishlist Controller', () => {
 
             expect(res.status).toHaveBeenCalledWith(201);
             expect(res.json).toHaveBeenCalledWith({ id: 'w2', name: 'Sách mới' });
-        });
-
-        it('should return 403 when free tier limit exceeded', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [{ count: '10' }] });
-
-            const req = mockReq({
-                coupleRoom: { id: 'uuid-room-1', is_premium: false },
-                body: { name: 'Vượt giới hạn' },
-            });
-            const res = mockRes();
-            const next = mockNext();
-
-            await create(req, res, next);
-
-            expect(res.status).toHaveBeenCalledWith(403);
-            expect(res.json.mock.calls[0][0].code).toBe('UPGRADE_REQUIRED');
-        });
-
-        it('should skip limit check for premium users', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'w3', name: 'Premium item' }] });
-
-            const req = mockReq({
-                coupleRoom: { id: 'uuid-room-1', is_premium: true },
-                body: { name: 'Premium item' },
-            });
-            const res = mockRes();
-            const next = mockNext();
-
-            await create(req, res, next);
-
-            // Only 1 query (INSERT), no count check
-            expect(mockQuery).toHaveBeenCalledTimes(1);
-            expect(res.status).toHaveBeenCalledWith(201);
         });
     });
 
@@ -133,8 +99,30 @@ describe('Wishlist Controller', () => {
 
             await markBought(req, res, next);
 
-            expect(mockQuery.mock.calls[0][0]).toMatch(/is_bought = TRUE/);
+            expect(mockQuery.mock.calls[0][0]).toMatch(/is_bought = \$3/);
+            expect(mockQuery.mock.calls[0][1][2]).toBe(true);
             expect(res.json).toHaveBeenCalledWith({ id: 'w1', is_bought: true });
+        });
+
+        it('should unmark item when is_bought=false', async () => {
+            mockQuery.mockResolvedValueOnce({
+                rows: [{ id: 'w1', is_bought: false, bought_at: null }],
+            });
+
+            const req = mockReq({
+                params: { id: 'w1' },
+                body: { is_bought: false },
+            });
+            const res = mockRes();
+            const next = mockNext();
+
+            await markBought(req, res, next);
+
+            const sql = mockQuery.mock.calls[0][0];
+            const params = mockQuery.mock.calls[0][1];
+            expect(sql).toMatch(/bought_at = CASE WHEN \$3 THEN NOW\(\) ELSE NULL END/);
+            expect(params[2]).toBe(false);
+            expect(res.json).toHaveBeenCalledWith({ id: 'w1', is_bought: false, bought_at: null });
         });
 
         it('should return 404 for non-existent item', async () => {
@@ -153,7 +141,9 @@ describe('Wishlist Controller', () => {
     // ────────────────────────────────────────────────────────
     describe('DELETE /wishlist/:id', () => {
         it('should soft-delete item', async () => {
-            mockQuery.mockResolvedValueOnce({});
+            mockQuery
+                .mockResolvedValueOnce({ rows: [{ id: 'w1', name: 'Gấu bông' }] })
+                .mockResolvedValueOnce({});
 
             const req = mockReq({ params: { id: 'w1' } });
             const res = mockRes();
@@ -161,7 +151,7 @@ describe('Wishlist Controller', () => {
 
             await remove(req, res, next);
 
-            expect(mockQuery.mock.calls[0][0]).toMatch(/is_deleted = TRUE/);
+            expect(mockQuery.mock.calls[1][0]).toMatch(/is_deleted = TRUE/);
             expect(res.json).toHaveBeenCalledWith({ success: true });
         });
     });
