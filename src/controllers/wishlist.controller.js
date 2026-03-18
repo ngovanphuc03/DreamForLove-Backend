@@ -51,8 +51,7 @@ async function list(req, res, next) {
 // POST /api/wishlist
 async function create(req, res, next) {
     try {
-        const { id: roomId } = req.coupleRoom;
-        const userId = req.dbUser.id;
+        const { id: roomId, is_premium } = req.coupleRoom;
         const { name, category, price, priority, image_url, product_url } = req.body;
 
         const result = await query(
@@ -92,8 +91,6 @@ async function markBought(req, res, next) {
     try {
         const { id } = req.params;
         const { id: roomId } = req.coupleRoom;
-        const userId = req.dbUser.id;
-        const desiredBought = req.body?.is_bought === false ? false : true;
 
         const result = await query(
             `UPDATE wish_items
@@ -161,44 +158,4 @@ async function remove(req, res, next) {
     }
 }
 
-// PATCH /api/wishlist/:id
-async function update(req, res, next) {
-    try {
-        const { id } = req.params;
-        const { id: roomId } = req.coupleRoom;
-        const userId = req.dbUser.id;
-        const { name, category, price, priority, image_url, product_url } = req.body;
-
-        const result = await query(
-            `UPDATE wish_items
-             SET name = COALESCE($3, name),
-                 category = COALESCE($4, category),
-                 price = COALESCE($5, price),
-                 priority = COALESCE($6, priority),
-                 image_url = COALESCE($7, image_url),
-                 product_url = COALESCE($8, product_url),
-                 updated_at = NOW()
-             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
-             RETURNING *`,
-            [id, roomId, name, category, price, priority, image_url, product_url]
-        );
-
-        if (!result.rows.length) {
-            return res.status(404).json({ error: 'Wish item not found' });
-        }
-
-        const io = getIO();
-        if (io) {
-            io.to(`room:${roomId}`).except(`user:${userId}`).emit('wishlist:sync', {
-                action: 'update',
-                item: result.rows[0],
-            });
-        }
-
-        res.json(result.rows[0]);
-    } catch (err) {
-        next(err);
-    }
-}
-
-module.exports = { list, create, markBought, remove, update };
+module.exports = { list, create, markBought, remove };
