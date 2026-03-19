@@ -179,21 +179,39 @@ function initSocket(io) {
                 return;
             }
 
+            // Validate room is still active and this user is still a member.
+            try {
+                const activeRoom = await query(
+                    `SELECT 1 FROM couple_rooms
+                     WHERE id = $1
+                       AND status = 'active'
+                       AND (user_a_id = $2 OR user_b_id = $2)
+                     LIMIT 1`,
+                    [socket.coupleRoomId, userId]
+                );
+                if (!activeRoom.rows.length) {
+                    logger.warn(`[Socket] ping:partner from ${userId} ignored – inactive/unauthorized room ${socket.coupleRoomId}`);
+                    socket.leave(`room:${socket.coupleRoomId}`);
+                    socket.coupleRoomId = null;
+                    socket.emit('ping:sent', { delivered: false, reason: 'inactive_room' });
+                    return;
+                }
+            } catch (err) {
+                logger.error(`[Socket] ping:partner room validation error: ${err.message}`);
+                socket.emit('ping:sent', { delivered: false, reason: 'room_validation_failed' });
+                return;
+            }
+
             logger.info(`[Socket] ping:partner from ${userId} in room ${socket.coupleRoomId}`);
 
-            // 1. Emit to online partner via socket room
-            socket.to(`room:${socket.coupleRoomId}`).emit('partner:ping', {
-                userId,
-                displayName: socket.dbUser.display_name,
-            });
+            let partnerId = null;
+            let partnerFcmToken = null;
+            let partnerDisplayName = null;
 
-            // 2. Push notification for when partner app is backgrounded / killed
-            let pushSent = false;
-            let pushReason = 'unknown';
             try {
-                // Simpler, reliable query: find the OTHER user in this couple room
+                // Find the OTHER user in this couple room.
                 const partnerResult = await query(
-                    `SELECT u.fcm_token, u.display_name
+                    `SELECT u.id, u.fcm_token, u.display_name
                      FROM couple_rooms cr
                      JOIN users u ON (
                        (cr.user_a_id = $1 AND cr.user_b_id = u.id) OR
@@ -205,11 +223,37 @@ function initSocket(io) {
                 );
 
                 const partner = partnerResult.rows[0];
-                logger.info(`[Socket] Partner FCM token: ${partner?.fcm_token ? 'found' : 'NOT FOUND'}`);
+                if (!partner?.id) {
+                    socket.emit('ping:sent', { delivered: false, reason: 'partner_not_found' });
+                    return;
+                }
 
-                if (partner?.fcm_token) {
+                partnerId = partner.id;
+                partnerFcmToken = partner.fcm_token || null;
+                partnerDisplayName = partner.display_name || null;
+            } catch (err) {
+                logger.error(`[Socket] ping:partner partner lookup error: ${err.message}`);
+                socket.emit('ping:sent', { delivered: false, reason: 'partner_lookup_failed' });
+                return;
+            }
+
+            const partnerOnline = isUserOnline(partnerId);
+
+            // 1. Emit directly to partner user room (robust even if partner has not joined room:<id>)
+            io.to(`user:${partnerId}`).emit('partner:ping', {
+                userId,
+                displayName: socket.dbUser.display_name,
+            });
+
+            // 2. Push notification for when partner app is backgrounded / killed
+            let pushSent = false;
+            let pushReason = 'unknown';
+            try {
+                logger.info(`[Socket] Partner (${partnerDisplayName || partnerId}) FCM token: ${partnerFcmToken ? 'found' : 'NOT FOUND'}`);
+
+                if (partnerFcmToken) {
                     const sent = await sendPushNotification({
-                        token: partner.fcm_token,
+                        token: partnerFcmToken,
                         title: `${socket.dbUser.display_name} nhớ bạn 💕`,
                         body: 'Chạm vào để xem rung tim!',
                         data: { type: 'HEARTBEAT_PING' },
@@ -231,7 +275,13 @@ function initSocket(io) {
             }
 
             // 3. Acknowledge back to sender
-            socket.emit('ping:sent', { delivered: true, pushSent, pushReason });
+            socket.emit('ping:sent', {
+                delivered: true,
+                pushSent,
+                pushReason,
+                partnerOnline,
+                partnerId,
+            });
         });
 
         // ── Disconnect ───────────────────────────────────────────────────────────
