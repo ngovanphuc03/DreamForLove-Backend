@@ -133,29 +133,11 @@ async function remove(req, res, next) {
         const result = await query(
             `UPDATE wish_items
        SET is_deleted = TRUE, updated_at = NOW()
-       WHERE id = $1 AND couple_room_id = $2 AND added_by = $3 AND is_deleted = FALSE
-       RETURNING *`,
-            [id, roomId, userId]
+       WHERE id = $1 AND couple_room_id = $2`,
+            [id, roomId]
         );
 
-        if (!result.rows.length) {
-            const ownershipCheck = await query(
-                `SELECT id, added_by
-                     FROM wish_items
-                     WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE`,
-                [id, roomId]
-            );
-
-            if (ownershipCheck.rows.length) {
-                return res.status(403).json({
-                    error: 'Bạn chỉ có thể xóa wishlist của mình / You can only delete your own wishlist item',
-                });
-            }
-
-            return res.status(404).json({ error: 'Wish item not found' });
-        }
-
-        const deletedItem = result.rows[0];
+        const deletedItem = beforeDelete.rows[0];
         if (deletedItem) {
             const io = getIO();
             if (io) {
