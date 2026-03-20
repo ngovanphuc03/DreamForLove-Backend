@@ -141,9 +141,7 @@ describe('Wishlist Controller', () => {
     // ────────────────────────────────────────────────────────
     describe('DELETE /wishlist/:id', () => {
         it('should soft-delete item', async () => {
-            mockQuery
-                .mockResolvedValueOnce({ rows: [{ id: 'w1', name: 'Gấu bông' }] })
-                .mockResolvedValueOnce({});
+            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'w1', name: 'Gấu bông', is_deleted: true }] });
 
             const req = mockReq({ params: { id: 'w1' } });
             const res = mockRes();
@@ -151,8 +149,40 @@ describe('Wishlist Controller', () => {
 
             await remove(req, res, next);
 
-            expect(mockQuery.mock.calls[1][0]).toMatch(/is_deleted = TRUE/);
+            expect(mockQuery.mock.calls[0][0]).toMatch(/is_deleted = TRUE/);
+            expect(mockQuery.mock.calls[0][1]).toEqual(['w1', 'uuid-room-1', 'uuid-user-a']);
             expect(res.json).toHaveBeenCalledWith({ success: true });
+        });
+
+        it('should return 403 when trying to delete partner item', async () => {
+            mockQuery
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [{ id: 'w1', added_by: 'uuid-user-2' }] });
+
+            const req = mockReq({ params: { id: 'w1' } });
+            const res = mockRes();
+            const next = mockNext();
+
+            await remove(req, res, next);
+
+            expect(res.status).toHaveBeenCalledWith(403);
+            expect(res.json).toHaveBeenCalledWith({
+                error: 'Bạn chỉ có thể xóa wishlist của mình / You can only delete your own wishlist item',
+            });
+        });
+
+        it('should return 404 when item not found', async () => {
+            mockQuery
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [] });
+
+            const req = mockReq({ params: { id: 'invalid' } });
+            const res = mockRes();
+            const next = mockNext();
+
+            await remove(req, res, next);
+
+            expect(res.status).toHaveBeenCalledWith(404);
         });
     });
 });

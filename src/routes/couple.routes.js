@@ -32,6 +32,9 @@ router.post(
 // DELETE /api/couple/me – soft-delete (disconnect)
 router.delete('/me', requireCouple, coupleCtrl.disconnect);
 
+// POST /api/couple/heartbeat – HTTP fallback when socket ack is delayed
+router.post('/heartbeat', requireCouple, coupleCtrl.sendHeartbeat);
+
 // ── Milestones ──────────────────────────────────────────────────
 router.get('/milestones', requireCouple, coupleCtrl.getMilestones);
 router.post(

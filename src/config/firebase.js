@@ -62,6 +62,9 @@ async function sendPushNotification({ token, title, body, data }) {
         data: stringData,
         android: {
             priority: 'high',
+            ttl: 60 * 60 * 24,
+            collapseKey: 'heartbeat_ping',
+            directBootOk: true,
             notification: {
                 channelId: 'heartbeat_channel',
                 sound: 'default',
@@ -70,7 +73,11 @@ async function sendPushNotification({ token, title, body, data }) {
             },
         },
         apns: {
-            headers: { 'apns-priority': '10' },
+            headers: {
+                'apns-priority': '10',
+                'apns-push-type': 'alert',
+                'apns-expiration': `${Math.floor(Date.now() / 1000) + (60 * 60 * 24)}`,
+            },
             payload: {
                 aps: {
                     sound: 'default',
