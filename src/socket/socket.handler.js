@@ -223,78 +223,33 @@ function initSocket(io) {
                 );
 
                 const partner = partnerResult.rows[0];
-                if (!partner?.id) {
-                    socket.emit('ping:sent', { delivered: false, reason: 'partner_not_found' });
-                    return;
-                }
+                logger.info(`[Socket] Partner FCM token: ${partner?.fcm_token ? 'found' : 'NOT FOUND'}`);
 
-                partnerId = partner.id;
-                partnerFcmToken = partner.fcm_token || null;
-                partnerDisplayName = partner.display_name || null;
-            } catch (err) {
-                logger.error(`[Socket] ping:partner partner lookup error: ${err.message}`);
-                socket.emit('ping:sent', { delivered: false, reason: 'partner_lookup_failed' });
-                return;
-            }
-
-            const partnerOnline = isUserOnline(partnerId);
-
-            // 1. Emit directly to partner user room (robust even if partner has not joined room:<id>)
-            io.to(`user:${partnerId}`).emit('partner:ping', {
-                userId,
-                displayName: socket.dbUser.display_name,
-            });
-
-            // 2. Acknowledge back to sender immediately (do not wait for FCM)
-            const initialPushReason = partnerFcmToken ? 'queued' : 'missing_fcm_token';
-            socket.emit('ping:sent', {
-                delivered: true,
-                pushSent: false,
-                pushReason: initialPushReason,
-                partnerOnline,
-                partnerId,
-            });
-
-            // 3. Push notification for when partner app is backgrounded / killed
-            // Run in background to avoid delaying socket ack.
-            if (partnerFcmToken) {
-                (async () => {
-                    try {
-                        logger.info(`[Socket] Partner (${partnerDisplayName || partnerId}) FCM token: found`);
-                        const sent = await sendPushNotification({
-                            token: partnerFcmToken,
-                            title: `${socket.dbUser.display_name} nhớ bạn 💕`,
-                            body: 'Chạm vào để xem rung tim!',
-                            data: { type: 'HEARTBEAT_PING' },
-                        });
-
-                        socket.emit('ping:sent:update', {
-                            delivered: true,
-                            pushSent: sent,
-                            pushReason: sent ? 'sent' : 'push_send_failed',
-                            partnerOnline,
-                            partnerId,
-                        });
-
-                        if (sent) {
-                            logger.info(`[Socket] Push sent to partner of user ${userId}`);
-                        } else {
-                            logger.warn(`[Socket] Push failed to partner of user ${userId}`);
-                        }
-                    } catch (err) {
-                        logger.error(`[Socket] ping:partner push error: ${err.message}`);
-                        socket.emit('ping:sent:update', {
-                            delivered: true,
-                            pushSent: false,
-                            pushReason: 'push_error',
-                            partnerOnline,
-                            partnerId,
-                        });
+                if (partner?.fcm_token) {
+                    const sent = await sendPushNotification({
+                        token: partner.fcm_token,
+                        title: `${socket.dbUser.display_name} nhớ bạn 💕`,
+                        body: 'Chạm vào để xem rung tim!',
+                        data: { type: 'HEARTBEAT_PING' },
+                    });
+                    if (sent) {
+                        pushSent = true;
+                        pushReason = 'sent';
+                        logger.info(`[Socket] Push sent to partner of user ${userId}`);
+                    } else {
+                        pushReason = 'push_send_failed';
+                        logger.warn(`[Socket] Push failed to partner of user ${userId}`);
                     }
-                })();
-            } else {
-                logger.info(`[Socket] Partner (${partnerDisplayName || partnerId}) FCM token: NOT FOUND`);
+                } else {
+                    pushReason = 'missing_fcm_token';
+                }
+            } catch (err) {
+                pushReason = 'push_error';
+                logger.error(`[Socket] ping:partner push error: ${err.message}`);
             }
+
+            // 3. Acknowledge back to sender
+            socket.emit('ping:sent', { delivered: true, pushSent, pushReason });
         });
 
         // ── Disconnect ───────────────────────────────────────────────────────────
