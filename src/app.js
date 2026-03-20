@@ -23,6 +23,16 @@ const app = express();
 const server = http.createServer(app);
 
 const isDevEnv = process.env.NODE_ENV !== 'production';
+const trustProxyEnv = (process.env.TRUST_PROXY || '').trim().toLowerCase();
+const trustProxyValue =
+    trustProxyEnv === 'true'
+        ? 1
+        : trustProxyEnv === 'false'
+            ? false
+            : (!isDevEnv ? 1 : false);
+
+app.set('trust proxy', trustProxyValue);
+
 const allowedOrigins = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
     : ['http://localhost:8080', 'http://localhost:3000', 'http://localhost:5000'];
