@@ -35,6 +35,21 @@ function errorHandler(err, req, res, next) {  // eslint-disable-line no-unused-v
         return res.status(400).json({ error: 'Referenced resource does not exist' });
     }
 
+    // Postgres string/value too long (22001)
+    if (err.code === '22001') {
+        return res.status(400).json({ error: 'Dữ liệu quá dài so với giới hạn cho phép' });
+    }
+
+    // Postgres invalid text representation / bad type cast (22P02)
+    if (err.code === '22P02') {
+        return res.status(400).json({ error: 'Dữ liệu đầu vào không đúng định dạng' });
+    }
+
+    // Postgres check constraint violation (23514)
+    if (err.code === '23514') {
+        return res.status(400).json({ error: 'Dữ liệu không thỏa điều kiện hợp lệ' });
+    }
+
     // Known operational error with explicit statusCode
     if (err.statusCode && err.statusCode < 500) {
         return res.status(err.statusCode).json({ error: err.message });

@@ -17,7 +17,7 @@ router.post(
     '/',
     [
         body('name').notEmpty().isString().trim().isLength({ max: 255 }),
-        body('category').optional().isString().trim(),
+        body('category').optional().isString().trim().isLength({ max: 100 }),
         body('price').optional().isFloat({ min: 0 }),
         body('priority').optional().isIn(['low', 'mid', 'high']),
         body('image_url').optional().isURL(),
@@ -45,7 +45,7 @@ router.patch(
     '/:id',
     [
         body('name').optional().isString().trim().isLength({ max: 255 }),
-        body('category').optional().isString().trim(),
+        body('category').optional().isString().trim().isLength({ max: 100 }),
         body('price').optional().isFloat({ min: 0 }),
         body('priority').optional().isIn(['low', 'mid', 'high']),
         body('image_url').optional().isURL(),
