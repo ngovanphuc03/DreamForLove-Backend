@@ -73,9 +73,7 @@ describe('Food Controller', () => {
     // ────────────────────────────────────────────────────────
     describe('DELETE /food/:id', () => {
         it('should soft-delete food item', async () => {
-            mockQuery
-                .mockResolvedValueOnce({ rows: [{ id: 'f1', name: 'Phở' }] })
-                .mockResolvedValueOnce({});
+            mockQuery.mockResolvedValueOnce({ rows: [{ id: 'f1', name: 'Phở', is_deleted: true }] });
 
             const req = mockReq({ params: { id: 'f1' } });
             const res = mockRes();
@@ -83,17 +81,31 @@ describe('Food Controller', () => {
 
             await remove(req, res, next);
 
-            expect(mockQuery.mock.calls[1][0]).toMatch(/is_deleted = TRUE/);
+            expect(mockQuery.mock.calls[0][0]).toMatch(/is_deleted = TRUE/);
             expect(res.json).toHaveBeenCalledWith({ success: true });
+        });
+
+        it('should return 404 when food item not found', async () => {
+            mockQuery.mockResolvedValueOnce({ rows: [] });
+
+            const req = mockReq({ params: { id: 'invalid' } });
+            const res = mockRes();
+            const next = mockNext();
+
+            await remove(req, res, next);
+
+            expect(res.status).toHaveBeenCalledWith(404);
         });
     });
 
     // ────────────────────────────────────────────────────────
     describe('GET /food/spin', () => {
         it('should return a random food item', async () => {
-            mockQuery.mockResolvedValueOnce({
-                rows: [{ id: 'f1', name: 'Phở', emoji: '🍜' }],
-            });
+            mockQuery
+                .mockResolvedValueOnce({ rows: [{ total: 2 }] })
+                .mockResolvedValueOnce({
+                    rows: [{ id: 'f1', name: 'Phở', emoji: '🍜' }],
+                });
 
             const req = mockReq();
             const res = mockRes();
@@ -101,14 +113,15 @@ describe('Food Controller', () => {
 
             await spin(req, res, next);
 
-            expect(mockQuery.mock.calls[0][0]).toMatch(/ORDER BY RANDOM/);
+            expect(mockQuery.mock.calls[0][0]).toMatch(/COUNT\(\*\)::int AS total/);
+            expect(mockQuery.mock.calls[1][0]).toMatch(/LIMIT 1 OFFSET/);
             expect(res.json).toHaveBeenCalledWith({
                 item: { id: 'f1', name: 'Phở', emoji: '🍜' },
             });
         });
 
         it('should return 404 when no food items', async () => {
-            mockQuery.mockResolvedValueOnce({ rows: [] });
+            mockQuery.mockResolvedValueOnce({ rows: [{ total: 0 }] });
 
             const req = mockReq();
             const res = mockRes();
@@ -117,6 +130,21 @@ describe('Food Controller', () => {
             await spin(req, res, next);
 
             expect(res.status).toHaveBeenCalledWith(404);
+        });
+
+        it('should fallback to first item when offset query returns empty', async () => {
+            mockQuery
+                .mockResolvedValueOnce({ rows: [{ total: 1 }] })
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [{ id: 'f9', name: 'Pizza' }] });
+
+            const req = mockReq();
+            const res = mockRes();
+            const next = mockNext();
+
+            await spin(req, res, next);
+
+            expect(res.json).toHaveBeenCalledWith({ item: { id: 'f9', name: 'Pizza' } });
         });
     });
 });

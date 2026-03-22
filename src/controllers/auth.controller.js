@@ -11,7 +11,11 @@ async function login(req, res, next) {
         const provider = req.user.firebase?.sign_in_provider || 'google';
 
         // Allow client to supply display name and photo (non-sensitive)
-        const { display_name, photo_url } = req.body;
+        const body = req.body || {};
+        const hasDisplayName = Object.prototype.hasOwnProperty.call(body, 'display_name');
+        const hasPhotoUrl = Object.prototype.hasOwnProperty.call(body, 'photo_url');
+        const display_name = hasDisplayName ? body.display_name : null;
+        const photo_url = hasPhotoUrl ? body.photo_url : null;
 
         // Upsert user (create or update)
         const result = await query(
@@ -19,11 +23,20 @@ async function login(req, res, next) {
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (firebase_uid) DO UPDATE SET
          email        = COALESCE(EXCLUDED.email, users.email),
-         display_name = COALESCE(EXCLUDED.display_name, users.display_name),
-         photo_url    = COALESCE(EXCLUDED.photo_url, users.photo_url),
+                 display_name = CASE WHEN $7 THEN EXCLUDED.display_name ELSE users.display_name END,
+                 photo_url    = CASE WHEN $8 THEN EXCLUDED.photo_url ELSE users.photo_url END,
          updated_at   = NOW()
        RETURNING *`,
-            [uuidv4(), firebase_uid, email, display_name || null, photo_url || null, provider]
+            [
+                uuidv4(),
+                firebase_uid,
+                email,
+                display_name,
+                photo_url,
+                provider,
+                hasDisplayName,
+                hasPhotoUrl,
+            ]
         );
 
         res.json({ user: result.rows[0] });
