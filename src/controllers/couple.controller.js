@@ -292,118 +292,6 @@ async function disconnect(req, res, next) {
     }
 }
 
-// POST /api/couple/heartbeat (HTTP fallback for ping:partner socket event)
-async function sendHeartbeat(req, res, next) {
-    try {
-        const roomId = req.coupleRoom.id;
-        const userId = req.dbUser.id;
-
-        const partnerResult = await query(
-            `SELECT u.id, u.fcm_token, u.display_name
-             FROM couple_rooms cr
-             JOIN users u ON (
-               (cr.user_a_id = $1 AND cr.user_b_id = u.id) OR
-               (cr.user_b_id = $1 AND cr.user_a_id = u.id)
-             )
-             WHERE cr.id = $2 AND cr.status = 'active'
-             LIMIT 1`,
-            [userId, roomId]
-        );
-
-        const partner = partnerResult.rows[0];
-        if (!partner?.id) {
-            return res.status(404).json({
-                delivered: false,
-                reason: 'partner_not_found',
-                message: 'Không tìm thấy đối phương trong phòng đôi.',
-            });
-        }
-
-        const partnerOnline = isUserOnline(partner.id);
-
-        // Realtime delivery to partner sockets (if connected)
-        const io = getIO();
-        if (io) {
-            io.to(`user:${partner.id}`).emit('partner:ping', {
-                userId,
-                displayName: req.dbUser.display_name,
-            });
-        }
-
-        // Push fallback for offline/background partner
-        let pushSent = false;
-        let pushReason = partner.fcm_token ? 'queued' : 'missing_fcm_token';
-
-        if (partner.fcm_token) {
-            try {
-                pushSent = await sendPushNotification({
-                    token: partner.fcm_token,
-                    title: `${req.dbUser.display_name} nhớ bạn 💕`,
-                    body: 'Chạm vào để xem rung tim!',
-                    data: { type: 'HEARTBEAT_PING' },
-                });
-                pushReason = pushSent ? 'sent' : 'push_send_failed';
-            } catch (_) {
-                pushSent = false;
-                pushReason = 'push_error';
-            }
-        }
-
-        return res.json({
-            delivered: true,
-            partnerOnline,
-            partnerId: partner.id,
-            pushSent,
-            pushReason,
-            via: 'http_fallback',
-        });
-    } catch (err) {
-        next(err);
-    }
-}
-
-// PATCH /api/couple/memory-photo
-async function updateMemoryPhoto(req, res, next) {
-    try {
-        const roomId = req.coupleRoom.id;
-        const userId = req.dbUser.id;
-        const raw = req.body?.image_base64;
-        const normalized = typeof raw === 'string' && raw.trim().length
-            ? raw.trim()
-            : null;
-
-        const result = await query(
-            `UPDATE couple_rooms
-             SET memory_photo_base64 = $2,
-                 updated_at = NOW()
-             WHERE id = $1
-             RETURNING id, memory_photo_base64, updated_at`,
-            [roomId, normalized]
-        );
-
-        const updated = result.rows[0];
-        const io = getIO();
-        if (io) {
-            io.to(`room:${roomId}`).emit('couple:memory-photo-updated', {
-                roomId,
-                byUserId: userId,
-                hasPhoto: !!updated?.memory_photo_base64,
-                updatedAt: updated?.updated_at || new Date().toISOString(),
-            });
-        }
-
-        return res.json({
-            success: true,
-            roomId,
-            hasPhoto: !!updated?.memory_photo_base64,
-            memory_photo_base64: updated?.memory_photo_base64 || null,
-            updated_at: updated?.updated_at || new Date().toISOString(),
-        });
-    } catch (err) {
-        next(err);
-    }
-}
-
 // ── Milestones CRUD ──────────────────────────────────────────────
 async function getMilestones(req, res, next) {
     try {
@@ -473,6 +361,5 @@ async function deleteMilestone(req, res, next) {
 
 module.exports = {
     getMyRoom, generateCode, joinWithCode, disconnect,
-    getMilestones, createMilestone, updateMilestone, deleteMilestone,
-    sendHeartbeat, updateMemoryPhoto,
+    getMilestones, createMilestone, updateMilestone, deleteMilestone
 };
