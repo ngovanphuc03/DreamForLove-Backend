@@ -34,22 +34,7 @@ function errorHandler(err, req, res, next) {  // eslint-disable-line no-unused-v
 
     // Postgres FK-violation (23503)
     if (err.code === '23503') {
-        return res.status(400).json({ error: 'Referenced resource does not exist', request_id: req.requestId || null });
-    }
-
-    // Postgres string/value too long (22001)
-    if (err.code === '22001') {
-        return res.status(400).json({ error: 'Dữ liệu quá dài so với giới hạn cho phép', request_id: req.requestId || null });
-    }
-
-    // Postgres invalid text representation / bad type cast (22P02)
-    if (err.code === '22P02') {
-        return res.status(400).json({ error: 'Dữ liệu đầu vào không đúng định dạng', request_id: req.requestId || null });
-    }
-
-    // Postgres check constraint violation (23514)
-    if (err.code === '23514') {
-        return res.status(400).json({ error: 'Dữ liệu không thỏa điều kiện hợp lệ', request_id: req.requestId || null });
+        return res.status(400).json({ error: 'Referenced resource does not exist' });
     }
 
     // Known operational error with explicit statusCode
