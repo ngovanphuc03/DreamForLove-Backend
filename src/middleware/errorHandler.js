@@ -14,6 +14,7 @@ function errorHandler(err, req, res, next) {  // eslint-disable-line no-unused-v
             method: req.method,
             url: req.originalUrl,
             user: req.user?.uid ?? 'unauthenticated',
+            requestId: req.requestId || null,
         });
     }
 
@@ -22,22 +23,38 @@ function errorHandler(err, req, res, next) {  // eslint-disable-line no-unused-v
         return res.status(422).json({
             error: 'Validation failed',
             detail: err.errors,
+            request_id: req.requestId || null,
         });
     }
 
     // Postgres unique-violation (23505) — e.g. duplicate firebase_uid
     if (err.code === '23505') {
-        return res.status(409).json({ error: 'Resource already exists' });
+        return res.status(409).json({ error: 'Resource already exists', request_id: req.requestId || null });
     }
 
     // Postgres FK-violation (23503)
     if (err.code === '23503') {
-        return res.status(400).json({ error: 'Referenced resource does not exist' });
+        return res.status(400).json({ error: 'Referenced resource does not exist', request_id: req.requestId || null });
+    }
+
+    // Postgres string/value too long (22001)
+    if (err.code === '22001') {
+        return res.status(400).json({ error: 'Dữ liệu quá dài so với giới hạn cho phép', request_id: req.requestId || null });
+    }
+
+    // Postgres invalid text representation / bad type cast (22P02)
+    if (err.code === '22P02') {
+        return res.status(400).json({ error: 'Dữ liệu đầu vào không đúng định dạng', request_id: req.requestId || null });
+    }
+
+    // Postgres check constraint violation (23514)
+    if (err.code === '23514') {
+        return res.status(400).json({ error: 'Dữ liệu không thỏa điều kiện hợp lệ', request_id: req.requestId || null });
     }
 
     // Known operational error with explicit statusCode
     if (err.statusCode && err.statusCode < 500) {
-        return res.status(err.statusCode).json({ error: err.message });
+        return res.status(err.statusCode).json({ error: err.message, request_id: req.requestId || null });
     }
 
     // Fallback — don't leak internal details in production
@@ -45,7 +62,7 @@ function errorHandler(err, req, res, next) {  // eslint-disable-line no-unused-v
     const message =
         process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message;
 
-    return res.status(statusCode).json({ error: message });
+    return res.status(statusCode).json({ error: message, request_id: req.requestId || null });
 }
 
 /// Helper: create an operational error with a status code

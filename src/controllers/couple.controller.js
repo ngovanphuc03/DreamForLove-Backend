@@ -1,10 +1,16 @@
 const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
+const { randomInt } = require('crypto');
 const { getIO } = require('../socket/socket.handler');
+const { isUserOnline } = require('../socket/socket.handler');
+const { sendPushNotification } = require('../config/firebase');
+
+const PAIRING_CODE_EXPIRY_SECONDS = 15 * 60;
+const PAIRING_CODE_MAX_RETRIES = 5;
 
 // ── Helper: generate 6-digit code ──────────────────────────────
 function generateCode6() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(100000, 1000000).toString();
 }
 
 // ── Default milestones per couple room ────────────────────────
@@ -76,6 +82,7 @@ async function getMyRoom(req, res, next) {
                 days_together: room.days_together,
                 partner_name: partnerName,
                 partner_avatar: partnerAvatar,
+                memory_photo_base64: room.memory_photo_base64 || null,
                 is_active: room.status === 'active',
                 is_premium: room.is_premium || false,
             }
@@ -95,6 +102,20 @@ async function generateCode(req, res, next) {
         const userId = userResult.rows[0]?.id;
         if (!userId) return res.status(404).json({ error: 'User not found' });
 
+        const activeRoomResult = await query(
+            `SELECT id
+             FROM couple_rooms
+             WHERE status = 'active'
+               AND (user_a_id = $1 OR user_b_id = $1)
+             LIMIT 1`,
+            [userId]
+        );
+        if (activeRoomResult.rows.length) {
+            return res.status(409).json({
+                error: 'Bạn đang trong một phòng đôi hoạt động, không thể tạo mã mới.',
+            });
+        }
+
         // Invalidate existing codes
         await query(
             'UPDATE pairing_codes SET used = TRUE WHERE user_id = $1 AND NOT used',
@@ -105,9 +126,8 @@ async function generateCode(req, res, next) {
         let code;
         let inserted = false;
         let retries = 0;
-        const maxRetries = 5;
 
-        while (!inserted && retries < maxRetries) {
+        while (!inserted && retries < PAIRING_CODE_MAX_RETRIES) {
             code = generateCode6();
             const insertResult = await query(
                 `INSERT INTO pairing_codes (id, code, user_id)
@@ -126,7 +146,7 @@ async function generateCode(req, res, next) {
             throw new Error('Could not generate a unique pairing code. Please try again.');
         }
 
-        res.json({ code, expires_in_seconds: 900 });
+        res.json({ code, expires_in_seconds: PAIRING_CODE_EXPIRY_SECONDS });
     } catch (err) {
         next(err);
     }
@@ -162,6 +182,20 @@ async function joinWithCode(req, res, next) {
             const pairingCode = codeResult.rows[0];
             let userAId = pairingCode.user_id;
 
+            const userBActiveRoom = await client.query(
+                `SELECT id
+                                 FROM couple_rooms
+                                 WHERE status = 'active'
+                                     AND (user_a_id = $1 OR user_b_id = $1)
+                                 LIMIT 1`,
+                [userBId]
+            );
+            if (userBActiveRoom.rows.length) {
+                const err = new Error('Bạn đã có phòng đôi đang hoạt động');
+                err.statusCode = 409;
+                throw err;
+            }
+
             // Prevent self-pairing (in dev mode: auto-create a second user)
             if (userAId === userBId) {
                 if (process.env.NODE_ENV !== 'production') {
@@ -186,6 +220,20 @@ async function joinWithCode(req, res, next) {
                     err.statusCode = 400;
                     throw err;
                 }
+            }
+
+            const userAActiveRoom = await client.query(
+                `SELECT id
+                 FROM couple_rooms
+                 WHERE status = 'active'
+                   AND (user_a_id = $1 OR user_b_id = $1)
+                 LIMIT 1`,
+                [userAId]
+            );
+            if (userAActiveRoom.rows.length) {
+                const err = new Error('Người tạo mã đã có phòng đôi đang hoạt động');
+                err.statusCode = 409;
+                throw err;
             }
 
             // Mark code as used
@@ -260,6 +308,7 @@ async function joinWithCode(req, res, next) {
 async function disconnect(req, res, next) {
     try {
         const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
         const retentionDays = Number(process.env.DATA_RETENTION_DAYS) || 30;
 
         await query(
@@ -272,7 +321,128 @@ async function disconnect(req, res, next) {
             [roomId, retentionDays]
         );
 
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('couple:disconnected', {
+                roomId,
+                byUserId: userId,
+                at: new Date().toISOString(),
+            });
+        }
+
         res.json({ success: true, message: 'Đã ngắt kết nối. Dữ liệu sẽ được xóa sau 30 ngày.' });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// POST /api/couple/heartbeat (HTTP fallback for ping:partner socket event)
+async function sendHeartbeat(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const partnerResult = await query(
+            `SELECT u.id, u.fcm_token, u.display_name
+             FROM couple_rooms cr
+             JOIN users u ON (
+               (cr.user_a_id = $1 AND cr.user_b_id = u.id) OR
+               (cr.user_b_id = $1 AND cr.user_a_id = u.id)
+             )
+             WHERE cr.id = $2 AND cr.status = 'active'
+             LIMIT 1`,
+            [userId, roomId]
+        );
+
+        const partner = partnerResult.rows[0];
+        if (!partner?.id) {
+            return res.status(404).json({
+                delivered: false,
+                reason: 'partner_not_found',
+                message: 'Không tìm thấy đối phương trong phòng đôi.',
+            });
+        }
+
+        const partnerOnline = isUserOnline(partner.id);
+
+        // Realtime delivery to partner sockets (if connected)
+        const io = getIO();
+        if (io) {
+            io.to(`user:${partner.id}`).emit('partner:ping', {
+                userId,
+                displayName: req.dbUser.display_name,
+            });
+        }
+
+        // Push fallback for offline/background partner
+        let pushSent = false;
+        let pushReason = partner.fcm_token ? 'queued' : 'missing_fcm_token';
+
+        if (partner.fcm_token) {
+            try {
+                pushSent = await sendPushNotification({
+                    token: partner.fcm_token,
+                    title: `${req.dbUser.display_name} nhớ bạn 💕`,
+                    body: 'Chạm vào để xem rung tim!',
+                    data: { type: 'HEARTBEAT_PING' },
+                });
+                pushReason = pushSent ? 'sent' : 'push_send_failed';
+            } catch (_) {
+                pushSent = false;
+                pushReason = 'push_error';
+            }
+        }
+
+        return res.json({
+            delivered: true,
+            partnerOnline,
+            partnerId: partner.id,
+            pushSent,
+            pushReason,
+            via: 'http_fallback',
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// PATCH /api/couple/memory-photo
+async function updateMemoryPhoto(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+        const raw = req.body?.image_base64;
+        const normalized = typeof raw === 'string' && raw.trim().length
+            ? raw.trim()
+            : null;
+
+        const result = await query(
+            `UPDATE couple_rooms
+             SET memory_photo_base64 = $2,
+                 updated_at = NOW()
+             WHERE id = $1
+             RETURNING id, memory_photo_base64, updated_at`,
+            [roomId, normalized]
+        );
+
+        const updated = result.rows[0];
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('couple:memory-photo-updated', {
+                roomId,
+                byUserId: userId,
+                hasPhoto: !!updated?.memory_photo_base64,
+                updatedAt: updated?.updated_at || new Date().toISOString(),
+            });
+        }
+
+        return res.json({
+            success: true,
+            roomId,
+            hasPhoto: !!updated?.memory_photo_base64,
+            memory_photo_base64: updated?.memory_photo_base64 || null,
+            updated_at: updated?.updated_at || new Date().toISOString(),
+        });
     } catch (err) {
         next(err);
     }
@@ -296,7 +466,7 @@ async function createMilestone(req, res, next) {
     try {
         const roomId = req.coupleRoom.id;
         const { label, target_days, emoji } = req.body;
-        
+
         const result = await query(
             `INSERT INTO milestones (id, couple_room_id, label, target_days, emoji, is_custom)
              VALUES ($1, $2, $3, $4, $5, TRUE)
@@ -345,7 +515,8 @@ async function deleteMilestone(req, res, next) {
     }
 }
 
-module.exports = { 
+module.exports = {
     getMyRoom, generateCode, joinWithCode, disconnect,
-    getMilestones, createMilestone, updateMilestone, deleteMilestone
+    getMilestones, createMilestone, updateMilestone, deleteMilestone,
+    sendHeartbeat, updateMemoryPhoto,
 };

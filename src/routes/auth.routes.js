@@ -30,10 +30,32 @@ router.patch(
     verifyAuth,
     [
         body().custom((value) => {
-            const token = value?.token || value?.fcm_token;
-            if (typeof token !== 'string' || token.trim().length === 0) {
-                throw new Error('token is required');
+            const token = value?.token ?? value?.fcm_token;
+
+            // allow clearing token on logout/device revoke
+            if (token === null) {
+                return true;
             }
+
+            if (typeof token !== 'string') {
+                throw new Error('token must be a string or null');
+            }
+
+            const trimmed = token.trim();
+            if (!trimmed.length) {
+                throw new Error('token must not be empty');
+            }
+
+            // FCM registration token is typically URL-safe base64-ish + punctuation.
+            // Keep format strict enough to block obvious invalid payloads.
+            if (trimmed.length < 100 || trimmed.length > 4096) {
+                throw new Error('FCM token length is invalid');
+            }
+
+            if (!/^[A-Za-z0-9:_.-]+$/.test(trimmed)) {
+                throw new Error('FCM token format is invalid');
+            }
+
             return true;
         }),
     ],
