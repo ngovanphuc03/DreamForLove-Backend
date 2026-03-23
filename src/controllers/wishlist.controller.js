@@ -51,7 +51,8 @@ async function list(req, res, next) {
 // POST /api/wishlist
 async function create(req, res, next) {
     try {
-        const { id: roomId, is_premium } = req.coupleRoom;
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
         const { name, category, price, priority, image_url, product_url } = req.body;
 
         const result = await query(
@@ -91,6 +92,8 @@ async function markBought(req, res, next) {
     try {
         const { id } = req.params;
         const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
+        const desiredBought = req.body?.is_bought === false ? false : true;
 
         const result = await query(
             `UPDATE wish_items
@@ -127,21 +130,32 @@ async function remove(req, res, next) {
         const { id: roomId } = req.coupleRoom;
         const userId = req.dbUser.id;
 
-        const beforeDelete = await query(
-            `SELECT * FROM wish_items
-             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
-             LIMIT 1`,
-            [id, roomId]
-        );
-
-        await query(
+        const result = await query(
             `UPDATE wish_items
        SET is_deleted = TRUE, updated_at = NOW()
-       WHERE id = $1 AND couple_room_id = $2`,
-            [id, roomId]
+       WHERE id = $1 AND couple_room_id = $2 AND added_by = $3 AND is_deleted = FALSE
+       RETURNING *`,
+            [id, roomId, userId]
         );
 
-        const deletedItem = beforeDelete.rows[0];
+        if (!result.rows.length) {
+            const ownershipCheck = await query(
+                `SELECT id, added_by
+                     FROM wish_items
+                     WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE`,
+                [id, roomId]
+            );
+
+            if (ownershipCheck.rows.length) {
+                return res.status(403).json({
+                    error: 'Bạn chỉ có thể xóa wishlist của mình / You can only delete your own wishlist item',
+                });
+            }
+
+            return res.status(404).json({ error: 'Wish item not found' });
+        }
+
+        const deletedItem = result.rows[0];
         if (deletedItem) {
             const io = getIO();
             if (io) {
@@ -158,4 +172,44 @@ async function remove(req, res, next) {
     }
 }
 
-module.exports = { list, create, markBought, remove };
+// PATCH /api/wishlist/:id
+async function update(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
+        const { name, category, price, priority, image_url, product_url } = req.body;
+
+        const result = await query(
+            `UPDATE wish_items
+             SET name = COALESCE($3, name),
+                 category = COALESCE($4, category),
+                 price = COALESCE($5, price),
+                 priority = COALESCE($6, priority),
+                 image_url = COALESCE($7, image_url),
+                 product_url = COALESCE($8, product_url),
+                 updated_at = NOW()
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId, name, category, price, priority, image_url, product_url]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Wish item not found' });
+        }
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).except(`user:${userId}`).emit('wishlist:sync', {
+                action: 'update',
+                item: result.rows[0],
+            });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { list, create, markBought, remove, update };

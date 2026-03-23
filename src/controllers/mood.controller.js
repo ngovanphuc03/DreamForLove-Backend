@@ -67,15 +67,15 @@ async function getHistory(req, res, next) {
 // POST /api/mood
 async function create(req, res, next) {
     try {
-        const { type, note, audio_url } = req.body;
+        const { type, note } = req.body;
         const { id: roomId } = req.coupleRoom;
         const userId = req.dbUser.id;
 
         const result = await query(
-            `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note, audio_url)
-       VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-            [uuidv4(), roomId, userId, type, note || null, audio_url || null]
+            [uuidv4(), roomId, userId, type, note || null]
         );
 
         const entry = result.rows[0];

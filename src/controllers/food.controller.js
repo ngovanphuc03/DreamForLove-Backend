@@ -1,5 +1,6 @@
 const { query } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
+const { randomInt } = require('crypto');
 const { getIO } = require('../socket/socket.handler');
 
 // Premium limits removed — all features free for everyone
@@ -46,7 +47,8 @@ async function list(req, res, next) {
 // POST /api/food
 async function create(req, res, next) {
     try {
-        const { id: roomId, is_premium } = req.coupleRoom;
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
         const { name, emoji, location } = req.body;
 
         const result = await query(
@@ -77,19 +79,19 @@ async function remove(req, res, next) {
         const { id: roomId } = req.coupleRoom;
         const userId = req.dbUser.id;
 
-        const beforeDelete = await query(
-            `SELECT * FROM food_items
+        const result = await query(
+            `UPDATE food_items
+             SET is_deleted = TRUE
              WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
-             LIMIT 1`,
+             RETURNING *`,
             [id, roomId]
         );
 
-        await query(
-            'UPDATE food_items SET is_deleted = TRUE WHERE id = $1 AND couple_room_id = $2',
-            [id, roomId]
-        );
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Food item not found' });
+        }
 
-        const deletedItem = beforeDelete.rows[0];
+        const deletedItem = result.rows[0];
         if (deletedItem) {
             const io = getIO();
             if (io) {
@@ -111,6 +113,22 @@ async function spin(req, res, next) {
     try {
         const { id: roomId } = req.coupleRoom;
 
+        const eligibleCountResult = await query(
+            `SELECT COUNT(*)::int AS total
+             FROM food_items fi
+             WHERE fi.couple_room_id = $1
+               AND fi.is_deleted = FALSE
+               AND (fi.is_eaten = FALSE OR fi.last_eaten_at < NOW() - INTERVAL '7 days')`,
+            [roomId]
+        );
+
+        const totalEligible = eligibleCountResult.rows[0]?.total || 0;
+        if (totalEligible <= 0) {
+            return res.status(404).json({ error: 'Chưa có món ăn nào. Hãy thêm vào nhé!' });
+        }
+
+        const offset = randomInt(totalEligible);
+
         const result = await query(
             `SELECT fi.*, u.display_name AS added_by_name
        FROM food_items fi
@@ -118,13 +136,29 @@ async function spin(req, res, next) {
        WHERE fi.couple_room_id = $1 
          AND fi.is_deleted = FALSE
          AND (fi.is_eaten = FALSE OR fi.last_eaten_at < NOW() - INTERVAL '7 days')
-       ORDER BY RANDOM()
-       LIMIT 1`,
-            [roomId]
+       ORDER BY fi.created_at DESC, fi.id DESC
+       LIMIT 1 OFFSET $2`,
+            [roomId, offset]
         );
 
         if (!result.rows.length) {
-            return res.status(404).json({ error: 'Chưa có món ăn nào. Hãy thêm vào nhé!' });
+            const fallback = await query(
+                `SELECT fi.*, u.display_name AS added_by_name
+                 FROM food_items fi
+                 JOIN users u ON fi.added_by = u.id
+                 WHERE fi.couple_room_id = $1
+                   AND fi.is_deleted = FALSE
+                   AND (fi.is_eaten = FALSE OR fi.last_eaten_at < NOW() - INTERVAL '7 days')
+                 ORDER BY fi.created_at DESC, fi.id DESC
+                 LIMIT 1`,
+                [roomId]
+            );
+
+            if (!fallback.rows.length) {
+                return res.status(404).json({ error: 'Chưa có món ăn nào. Hãy thêm vào nhé!' });
+            }
+
+            return res.json({ item: fallback.rows[0] });
         }
 
         res.json({ item: result.rows[0] });
@@ -133,4 +167,73 @@ async function spin(req, res, next) {
     }
 }
 
-module.exports = { list, create, remove, spin };
+// PATCH /api/food/:id
+async function update(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
+        const { name, emoji, location } = req.body;
+
+        const result = await query(
+            `UPDATE food_items
+             SET name = COALESCE($3, name),
+                 emoji = COALESCE($4, emoji),
+                 location = COALESCE($5, location)
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId, name, emoji, location]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Food item not found' });
+        }
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).except(`user:${userId}`).emit('food:sync', {
+                action: 'update',
+                item: result.rows[0],
+            });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+// PATCH /api/food/:id/eaten
+async function markEaten(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { id: roomId } = req.coupleRoom;
+        const userId = req.dbUser.id;
+
+        const result = await query(
+            `UPDATE food_items
+             SET is_eaten = TRUE, last_eaten_at = NOW()
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Food item not found' });
+        }
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).except(`user:${userId}`).emit('food:sync', {
+                action: 'update',
+                item: result.rows[0],
+            });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+}
+
+module.exports = { list, create, remove, spin, update, markEaten };

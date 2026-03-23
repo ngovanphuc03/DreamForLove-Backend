@@ -16,6 +16,8 @@ const { Server: SocketServer } = require('socket.io');
 const { initSocket } = require('./socket/socket.handler');
 const { startCleanupJob, startCodeCleanupJob } = require('./jobs/cleanup.job');
 const { errorHandler } = require('./middleware/errorHandler');
+const { auditRequest } = require('./middleware/audit.middleware');
+const { attachRequestId } = require('./middleware/request-id.middleware');
 const routes = require('./routes');
 const logger = require('./config/logger');
 
@@ -23,6 +25,16 @@ const app = express();
 const server = http.createServer(app);
 
 const isDevEnv = process.env.NODE_ENV !== 'production';
+const trustProxyEnv = (process.env.TRUST_PROXY || '').trim().toLowerCase();
+const trustProxyValue =
+    trustProxyEnv === 'true'
+        ? 1
+        : trustProxyEnv === 'false'
+            ? false
+            : (!isDevEnv ? 1 : false);
+
+app.set('trust proxy', trustProxyValue);
+
 const allowedOrigins = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
     : ['http://localhost:8080', 'http://localhost:3000', 'http://localhost:5000'];
@@ -46,6 +58,8 @@ const io = new SocketServer(server, {
         credentials: true,
     },
     transports: ['websocket', 'polling'],
+    pingInterval: 25000,
+    pingTimeout: 20000,
 });
 
 // ── Security ─────────────────────────────────────────────────
@@ -73,7 +87,8 @@ app.use('/api/', limiter);
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(morgan('combined', {
+app.use(attachRequestId);
+app.use(morgan(':method :url :status :response-time ms req_id=:req[x-request-id]', {
     stream: { write: (msg) => logger.info(msg.trim()) },
 }));
 
@@ -109,7 +124,10 @@ app.get('/health', async (_, res) => {
 });
 
 // ── API Routes ───────────────────────────────────────────────
+app.use('/api', auditRequest);
+app.use('/api/v1', auditRequest);
 app.use('/api', routes);
+app.use('/api/v1', routes);
 
 // ── 404 handler ──────────────────────────────────────────────
 app.use((req, res) => {

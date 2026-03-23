@@ -8,7 +8,8 @@
         "dev": "nodemon src/app.js",
         "migrate": "node src/migrations/run.js",
         "lint": "eslint src/**/*.js",
-        "test": "jest --verbose --forceExit --detectOpenHandles"
+        "test": "jest --verbose --forceExit --detectOpenHandles",
+        "test:ci": "jest --coverage --runInBand"
     },
     "dependencies": {
         "express": "^4.18.2",
@@ -33,5 +34,15 @@
     },
     "engines": {
         "node": "20.x"
+    },
+    "jest": {
+        "coverageThreshold": {
+            "global": {
+                "branches": 50,
+                "functions": 60,
+                "lines": 60,
+                "statements": 60
+            }
+        }
     }
 }
