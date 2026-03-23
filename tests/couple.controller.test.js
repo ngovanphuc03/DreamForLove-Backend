@@ -76,6 +76,7 @@ describe('generateCode', () => {
     it('should generate a 6-digit code and return it', async () => {
         mockQuery
             .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })   // user lookup
+            .mockResolvedValueOnce({ rows: [] })                 // active room check
             .mockResolvedValueOnce({ rows: [] })                 // invalidate old codes
             .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'pc-1' }] }); // insert pairing_code
 
@@ -89,6 +90,20 @@ describe('generateCode', () => {
         const call = res.json.mock.calls[0][0];
         expect(call.code).toMatch(/^\d{6}$/);
         expect(call.expires_in_seconds).toBe(900);
+    });
+
+    it('should return 409 when user already has an active room', async () => {
+        mockQuery
+            .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+            .mockResolvedValueOnce({ rows: [{ id: 'room-1' }] });
+
+        const req = mockReq();
+        const res = mockRes();
+        const next = mockNext();
+
+        await generateCode(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(409);
     });
 
     it('should return 404 when user not found', async () => {

@@ -8,6 +8,7 @@ const { mockQuery, mockReq, mockRes, mockNext } = require('./setup');
 const { requireCouple } = require('../src/middleware/couple.middleware');
 const { validateRequest } = require('../src/middleware/validate.middleware');
 const { errorHandler } = require('../src/middleware/errorHandler');
+const { attachRequestId } = require('../src/middleware/request-id.middleware');
 
 beforeEach(() => {
     jest.clearAllMocks();
@@ -117,10 +118,39 @@ describe('Error Handler', () => {
 
 // ────────────────────────────────────────────────────────────
 describe('Rate Limiter exports', () => {
-    it('should export apiLimiter, authLimiter, codeLimiter', () => {
+    it('should export apiLimiter, authLimiter, codeLimiter, generateCodeLimiter', () => {
         const rateLimiters = require('../src/middleware/rateLimiter');
         expect(rateLimiters.apiLimiter).toBeDefined();
         expect(rateLimiters.authLimiter).toBeDefined();
         expect(rateLimiters.codeLimiter).toBeDefined();
+        expect(rateLimiters.generateCodeLimiter).toBeDefined();
+    });
+});
+
+// ────────────────────────────────────────────────────────────
+describe('Request ID middleware', () => {
+    it('should generate request id when header is missing', () => {
+        const req = { headers: {} };
+        const res = { setHeader: jest.fn() };
+        const next = mockNext();
+
+        attachRequestId(req, res, next);
+
+        expect(req.requestId).toBeDefined();
+        expect(typeof req.requestId).toBe('string');
+        expect(res.setHeader).toHaveBeenCalledWith('x-request-id', req.requestId);
+        expect(next).toHaveBeenCalled();
+    });
+
+    it('should reuse incoming x-request-id header', () => {
+        const req = { headers: { 'x-request-id': 'req-abc-123' } };
+        const res = { setHeader: jest.fn() };
+        const next = mockNext();
+
+        attachRequestId(req, res, next);
+
+        expect(req.requestId).toBe('req-abc-123');
+        expect(res.setHeader).toHaveBeenCalledWith('x-request-id', 'req-abc-123');
+        expect(next).toHaveBeenCalled();
     });
 });
