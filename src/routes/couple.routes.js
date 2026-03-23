@@ -49,33 +49,6 @@ router.post(
 // DELETE /api/couple/me – soft-delete (disconnect)
 router.delete('/me', requireCouple, coupleCtrl.disconnect);
 
-// POST /api/couple/heartbeat – HTTP fallback when socket ack is delayed
-router.post('/heartbeat', requireCouple, heartbeatLimiter, coupleCtrl.sendHeartbeat);
-
-// PATCH /api/couple/memory-photo – shared memory photo (base64) for both partners
-router.patch(
-    '/memory-photo',
-    requireCouple,
-    [
-        body('image_base64')
-            .optional({ nullable: true })
-            .isString()
-            .isLength({ max: 9000000 })
-            .custom((value) => {
-                if (!value || !value.trim()) return true;
-                const trimmed = value.trim();
-                const isDataImageUri = trimmed.startsWith('data:image/');
-                const isRawBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed);
-                if (!isDataImageUri && !isRawBase64) {
-                    throw new Error('image_base64 must be base64 or data:image URI');
-                }
-                return true;
-            }),
-    ],
-    validateRequest,
-    coupleCtrl.updateMemoryPhoto
-);
-
 // ── Milestones ──────────────────────────────────────────────────
 router.get('/milestones', requireCouple, coupleCtrl.getMilestones);
 router.post(

@@ -2,11 +2,6 @@ const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 const { randomInt } = require('crypto');
 const { getIO } = require('../socket/socket.handler');
-const { isUserOnline } = require('../socket/socket.handler');
-const { sendPushNotification } = require('../config/firebase');
-
-const PAIRING_CODE_EXPIRY_SECONDS = 15 * 60;
-const PAIRING_CODE_MAX_RETRIES = 5;
 
 // ── Helper: generate 6-digit code ──────────────────────────────
 function generateCode6() {
