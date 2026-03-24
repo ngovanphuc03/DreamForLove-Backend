@@ -58,8 +58,9 @@ const io = new SocketServer(server, {
         credentials: true,
     },
     transports: ['websocket', 'polling'],
-    pingInterval: 25000,
-    pingTimeout: 20000,
+    // Faster stale-connection detection for more accurate online/offline presence.
+    pingInterval: 10000,
+    pingTimeout: 10000,
 });
 
 // ── Security ─────────────────────────────────────────────────
