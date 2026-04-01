@@ -82,7 +82,7 @@ async function getMyRoom(req, res, next) {
                 days_together: room.days_together,
                 partner_name: partnerName,
                 partner_avatar: partnerAvatar,
-                memory_photo_base64: room.memory_photo_base64 || null,
+                memory_photo_base64: room.memory_photo_url || room.memory_photo_base64 || null,
                 is_active: room.status === 'active',
                 is_premium: room.is_premium || false,
             }
