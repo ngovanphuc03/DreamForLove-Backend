@@ -24,6 +24,24 @@ const DEFAULT_MILESTONES = [
     { days: 1825, label: '5 Năm', emoji: '👑' },
 ];
 
+const LEVEL_THRESHOLDS = [0, 100, 250, 450, 700, 1000, 1350, 1750];
+const XP_PER_QUALIFIED_DAY = 25;
+
+function computeLevelProgress(totalXp) {
+    let currentLevel = 1;
+    for (let i = 0; i < LEVEL_THRESHOLDS.length; i += 1) {
+        if (totalXp >= LEVEL_THRESHOLDS[i]) {
+            currentLevel = i + 1;
+        }
+    }
+
+    const currentLevelStartXp = LEVEL_THRESHOLDS[currentLevel - 1] || 0;
+    const nextLevelThresholdXp = LEVEL_THRESHOLDS[currentLevel] || (currentLevelStartXp + 450);
+    const xpToNextLevel = Math.max(nextLevelThresholdXp - totalXp, 0);
+
+    return { currentLevel, xpToNextLevel };
+}
+
 // GET /api/couple/me
 async function getMyRoom(req, res, next) {
     try {
@@ -82,7 +100,7 @@ async function getMyRoom(req, res, next) {
                 days_together: room.days_together,
                 partner_name: partnerName,
                 partner_avatar: partnerAvatar,
-                memory_photo_base64: room.memory_photo_base64 || null,
+                memory_photo_base64: room.memory_photo_url || room.memory_photo_base64 || null,
                 is_active: room.status === 'active',
                 is_premium: room.is_premium || false,
             }
@@ -304,6 +322,117 @@ async function joinWithCode(req, res, next) {
     }
 }
 
+// GET /api/couple/progress
+async function getProgress(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+        const partnerId = req.coupleRoom.user_a_id === userId
+            ? req.coupleRoom.user_b_id
+            : req.coupleRoom.user_a_id;
+
+        const todayStatusResult = await query(
+            `SELECT
+                COALESCE(BOOL_OR(user_id = $2), FALSE) AS me_done,
+                COALESCE(BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid), FALSE) AS partner_done
+             FROM mood_logs
+             WHERE couple_room_id = $1
+               AND (created_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+            [roomId, userId, partnerId || null]
+        );
+
+        const currentStreakResult = await query(
+            `WITH qualified_days AS (
+                SELECT (created_at AT TIME ZONE 'UTC')::date AS day
+                FROM mood_logs
+                WHERE couple_room_id = $1
+                GROUP BY 1
+                HAVING BOOL_OR(user_id = $2)
+                   AND BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid)
+            ),
+            ranked AS (
+                SELECT
+                    day,
+                    (CURRENT_DATE - day) AS day_offset,
+                    ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS rn
+                FROM qualified_days
+                WHERE day <= CURRENT_DATE
+            )
+            SELECT COALESCE(COUNT(*), 0)::int AS current_streak
+            FROM ranked
+            WHERE day_offset = rn`,
+            [roomId, userId, partnerId || null]
+        );
+
+        const bestStreakResult = await query(
+            `WITH qualified_days AS (
+                SELECT (created_at AT TIME ZONE 'UTC')::date AS day
+                FROM mood_logs
+                WHERE couple_room_id = $1
+                GROUP BY 1
+                HAVING BOOL_OR(user_id = $2)
+                   AND BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid)
+            ),
+            grouped AS (
+                SELECT
+                    day,
+                    day - (ROW_NUMBER() OVER (ORDER BY day))::int AS grp
+                FROM qualified_days
+            ),
+            streaks AS (
+                SELECT COUNT(*)::int AS len
+                FROM grouped
+                GROUP BY grp
+            )
+            SELECT COALESCE(MAX(len), 0)::int AS best_streak
+            FROM streaks`,
+            [roomId, userId, partnerId || null]
+        );
+
+        const qualifiedDaysResult = await query(
+            `SELECT COALESCE(COUNT(*), 0)::int AS total_qualified_days
+             FROM (
+                SELECT (created_at AT TIME ZONE 'UTC')::date AS day
+                FROM mood_logs
+                WHERE couple_room_id = $1
+                GROUP BY 1
+                HAVING BOOL_OR(user_id = $2)
+                   AND BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid)
+             ) q`,
+            [roomId, userId, partnerId || null]
+        );
+
+        const meDone = todayStatusResult.rows[0]?.me_done === true;
+        const partnerDone = todayStatusResult.rows[0]?.partner_done === true;
+        const qualifiedToday = meDone && partnerDone;
+
+        const currentStreak = currentStreakResult.rows[0]?.current_streak || 0;
+        const bestStreak = bestStreakResult.rows[0]?.best_streak || 0;
+        const totalQualifiedDays = qualifiedDaysResult.rows[0]?.total_qualified_days || 0;
+
+        const totalXp = totalQualifiedDays * XP_PER_QUALIFIED_DAY;
+        const { currentLevel, xpToNextLevel } = computeLevelProgress(totalXp);
+
+        return res.json({
+            data: {
+                currentStreak,
+                bestStreak,
+                totalXp,
+                currentLevel,
+                xpToNextLevel,
+                freezeCount: 0,
+                today: {
+                    meDone,
+                    partnerDone,
+                    qualified: qualifiedToday,
+                },
+            },
+        });
+    } catch (err) {
+        return next(err);
+    }
+}
+
 // DELETE /api/couple/me  (Soft delete)
 async function disconnect(req, res, next) {
     try {
@@ -517,6 +646,7 @@ async function deleteMilestone(req, res, next) {
 
 module.exports = {
     getMyRoom, generateCode, joinWithCode, disconnect,
+    getProgress,
     getMilestones, createMilestone, updateMilestone, deleteMilestone,
     sendHeartbeat, updateMemoryPhoto,
 };
