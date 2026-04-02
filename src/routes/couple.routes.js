@@ -18,6 +18,9 @@ router.use(verifyAuth);
 // GET  /api/couple/me – get current user's couple room info
 router.get('/me', coupleCtrl.getMyRoom);
 
+// GET /api/couple/progress – streak/level progress for current couple room
+router.get('/progress', requireCouple, coupleCtrl.getProgress);
+
 // POST /api/couple/generate-code – generate 6-digit pairing code
 router.post('/generate-code', generateCodeLimiter, coupleCtrl.generateCode);
 

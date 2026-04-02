@@ -14,7 +14,7 @@ const { initDB, getPool } = require('./config/database');
 const { initFirebase } = require('./config/firebase');
 const { Server: SocketServer } = require('socket.io');
 const { initSocket } = require('./socket/socket.handler');
-const { startCleanupJob, startCodeCleanupJob } = require('./jobs/cleanup.job');
+const { startCleanupJob, startCodeCleanupJob, startPetDecayJob } = require('./jobs/cleanup.job');
 const { errorHandler } = require('./middleware/errorHandler');
 const { auditRequest } = require('./middleware/audit.middleware');
 const { attachRequestId } = require('./middleware/request-id.middleware');
@@ -58,8 +58,9 @@ const io = new SocketServer(server, {
         credentials: true,
     },
     transports: ['websocket', 'polling'],
-    pingInterval: 25000,
-    pingTimeout: 20000,
+    // Faster stale-connection detection for more accurate online/offline presence.
+    pingInterval: 10000,
+    pingTimeout: 10000,
 });
 
 // ── Security ─────────────────────────────────────────────────
@@ -266,7 +267,8 @@ async function bootstrap() {
     if (dbAvailable) {
         startCleanupJob();
         startCodeCleanupJob();
-        logger.info('✅ Cron jobs initialized');
+        startPetDecayJob();
+        logger.info('✅ Cron jobs initialized (cleanup + pet decay)');
     } else {
         logger.warn('⚠️  Cron jobs skipped (no DB connection).');
     }
