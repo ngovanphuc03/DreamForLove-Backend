@@ -160,61 +160,6 @@ function initSocket(io) {
             socket.to(`room:${socket.coupleRoomId}`).emit('food:sync', { action, item });
         });
 
-        // ── Event: pet care action (socket alternative to REST) ──────────────────
-        socket.on('pet:action', async ({ action }) => {
-            if (!socket.coupleRoomId) {
-                return socket.emit('error', { message: 'Not in a couple room' });
-            }
-            const validActions = ['feed', 'pet', 'bathe', 'play'];
-            if (!validActions.includes(action)) {
-                return socket.emit('error', { message: `Invalid action: ${action}` });
-            }
-            try {
-                // Reuse REST controller logic so socket path and HTTP path stay consistent.
-                const petCtrl = require('../controllers/pet.controller');
-                const req = {
-                    params: { action },
-                    coupleRoom: { id: socket.coupleRoomId },
-                    dbUser: socket.dbUser,
-                };
-
-                const res = {
-                    _status: 200,
-                    _payload: null,
-                    status(code) {
-                        this._status = code;
-                        return this;
-                    },
-                    json(payload) {
-                        this._payload = payload;
-                        return this;
-                    },
-                };
-
-                let handlerError = null;
-                await petCtrl.performAction(req, res, (err) => {
-                    handlerError = err;
-                });
-
-                if (handlerError) {
-                    throw handlerError;
-                }
-
-                if (res._status >= 400) {
-                    const message = res._payload?.error || 'Lỗi khi chăm sóc pet';
-                    return socket.emit('pet:action:error', { action, message });
-                }
-
-                socket.emit('pet:action:ok', {
-                    action,
-                    meta: res._payload?.meta || null,
-                });
-            } catch (err) {
-                logger.error(`[Socket] pet:action error: ${err.message}`);
-                socket.emit('pet:action:error', { action, message: 'Lỗi khi chăm sóc pet' });
-            }
-        });
-
         // ── Event: request partner presence snapshot ───────────────────────────
         socket.on('partner:presence:request', async () => {
             try {
