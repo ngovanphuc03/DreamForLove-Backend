@@ -1,0 +1,14 @@
+0000000000000000000000000000000000000000 ce81618b6230a6eb1f2960484efd120b97c3f2f2 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773315629 +0700	commit (initial): Khoi tao backend
+ce81618b6230a6eb1f2960484efd120b97c3f2f2 ce81618b6230a6eb1f2960484efd120b97c3f2f2 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773315647 +0700	Branch: renamed refs/heads/master to refs/heads/main
+ce81618b6230a6eb1f2960484efd120b97c3f2f2 d0ea5bfe91b9d54f0983e89943cfa8bacb71399d Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773316130 +0700	commit: Loai bo node_modules khoi Git
+d0ea5bfe91b9d54f0983e89943cfa8bacb71399d e18453f98b9973e5689c97a7f0e0036afcdc0a09 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773337578 +0700	commit: fix: auto-run database migrations on startup - tables were not created on Render
+e18453f98b9973e5689c97a7f0e0036afcdc0a09 8c7f401e5409a62fb766b734593bcb1f829f5c9b Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773339709 +0700	commit: feat: diagnostic health endpoint + version bump to 1.0.1
+8c7f401e5409a62fb766b734593bcb1f829f5c9b 33b0c4151afcaa620aafa67753bd1f63a86c1023 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773341118 +0700	commit: fix: correct partner name query + emit socket event when pairing completes
+33b0c4151afcaa620aafa67753bd1f63a86c1023 c904fe40f257fc055c93528cf8e6653cd4cbf87f Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773342701 +0700	commit: Fix: Return user display_name in couple endpoints for correct greeting on Home screen
+c904fe40f257fc055c93528cf8e6653cd4cbf87f 4172b04846eed611005c2ca8f98e3820a264efd0 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773831575 +0700	commit: Fix firebase.js syntax error from Github conflict resolution
+4172b04846eed611005c2ca8f98e3820a264efd0 7d3a72db54bf8157b1c9b2a806ae13f3dba587fe Ngô Văn Phúc <bimbimchanel678@gmail.com> 1773831708 +0700	reset: moving to origin/main
+7d3a72db54bf8157b1c9b2a806ae13f3dba587fe 3cda21efb64a86660f49f8e206b75c1a8cbfabc2 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1774271022 +0700	commit: 22
+3cda21efb64a86660f49f8e206b75c1a8cbfabc2 62b6e359d0af27ed1e2e95652ec391eb4f32a4c6 Ngô Văn Phúc <bimbimchanel678@gmail.com> 1774271747 +0700	commit: 22
+62b6e359d0af27ed1e2e95652ec391eb4f32a4c6 65953a90cd62caa463413d8bd4b805b69bb877de Ngô Văn Phúc <bimbimchanel678@gmail.com> 1774272500 +0700	commit (merge): Merge branch 'main' of https://github.com/ngovanphuc03/DreamForLove-Backend
+65953a90cd62caa463413d8bd4b805b69bb877de 474a91f11af60d18350ef8f2989f071e29f769cc Ngô Văn Phúc <bimbimchanel678@gmail.com> 1775081255 +0700	commit: 123
+474a91f11af60d18350ef8f2989f071e29f769cc 706b3bbcb4e7598991d9d2cf8189d2c71bb8572e Ngô Văn Phúc <bimbimchanel678@gmail.com> 1775081526 +0700	commit (merge): Merge branch 'main' of https://github.com/ngovanphuc03/DreamForLove-Backend

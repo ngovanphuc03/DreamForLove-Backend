@@ -3,13 +3,28 @@ const logger = require('./logger');
 
 let pool;
 
+function normalizeConnectionString(connectionString) {
+    if (!connectionString) return connectionString;
+    try {
+        const parsed = new URL(connectionString);
+        const sslMode = (parsed.searchParams.get('sslmode') || '').toLowerCase();
+        if (sslMode === 'require' && !parsed.searchParams.has('uselibpqcompat')) {
+            parsed.searchParams.set('uselibpqcompat', 'true');
+        }
+        return parsed.toString();
+    } catch {
+        return connectionString;
+    }
+}
+
 function getPool() {
     if (!pool) {
-        // Support both DATABASE_URL (Neon/Supabase/Railway) and individual vars
+        // Support both DATABASE_URL (Aiven/Supabase/Railway) and individual vars
+        const normalizedDatabaseUrl = normalizeConnectionString(process.env.DATABASE_URL);
         const connectionConfig = process.env.DATABASE_URL
             ? {
-                connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },  // required by Neon/Supabase
+                connectionString: normalizedDatabaseUrl,
+                ssl: { rejectUnauthorized: false },  // required by managed cloud Postgres
             }
             : {
                 host: process.env.DB_HOST || 'localhost',
