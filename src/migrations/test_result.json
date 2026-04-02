@@ -1,0 +1,34 @@
+{
+  "old": {
+    "tables": {
+      "audit_logs": 0,
+      "couple_rooms": 9,
+      "food_items": 28,
+      "milestones": 63,
+      "mood_logs": 35,
+      "pairing_codes": 0,
+      "schema_migrations": 0,
+      "trip_plans": 3,
+      "users": 10,
+      "wish_items": 34
+    },
+    "connected": true
+  },
+  "new": {
+    "connected": true,
+    "db": "defaultdb",
+    "time": "2026-04-01T14:15:39.198Z",
+    "tables": {
+      "audit_logs": 0,
+      "couple_rooms": 9,
+      "food_items": 28,
+      "milestones": 63,
+      "mood_logs": 35,
+      "pairing_codes": 0,
+      "schema_migrations": 0,
+      "trip_plans": 3,
+      "users": 10,
+      "wish_items": 34
+    }
+  }
+}

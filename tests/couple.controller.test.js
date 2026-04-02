@@ -2,7 +2,12 @@
  * Couple Controller – Unit Tests
  */
 const { mockQuery, mockTransaction, mockReq, mockRes, mockNext } = require('./setup');
-const { getMyRoom, generateCode, joinWithCode, disconnect } = require('../src/controllers/couple.controller');
+const {
+    getMyRoom,
+    generateCode,
+    disconnect,
+    getProgress,
+} = require('../src/controllers/couple.controller');
 
 beforeEach(() => {
     jest.clearAllMocks();
@@ -148,6 +153,65 @@ describe('disconnect', () => {
         const next = mockNext();
 
         await disconnect(req, res, next);
+
+        expect(next).toHaveBeenCalledWith(err);
+    });
+});
+
+// ────────────────────────────────────────────────────────────
+describe('getProgress', () => {
+    it('should return computed streak and level payload', async () => {
+        mockQuery
+            .mockResolvedValueOnce({ rows: [{ me_done: true, partner_done: false }] })
+            .mockResolvedValueOnce({ rows: [{ current_streak: 3 }] })
+            .mockResolvedValueOnce({ rows: [{ best_streak: 8 }] })
+            .mockResolvedValueOnce({ rows: [{ total_qualified_days: 10 }] });
+
+        const req = mockReq({
+            dbUser: { id: 'uuid-user-a', display_name: 'A' },
+            coupleRoom: {
+                id: 'uuid-room-1',
+                user_a_id: 'uuid-user-a',
+                user_b_id: 'uuid-user-b',
+            },
+        });
+        const res = mockRes();
+        const next = mockNext();
+
+        await getProgress(req, res, next);
+
+        expect(res.json).toHaveBeenCalledWith({
+            data: {
+                currentStreak: 3,
+                bestStreak: 8,
+                totalXp: 250,
+                currentLevel: 3,
+                xpToNextLevel: 200,
+                freezeCount: 0,
+                today: {
+                    meDone: true,
+                    partnerDone: false,
+                    qualified: false,
+                },
+            },
+        });
+    });
+
+    it('should forward DB errors to next()', async () => {
+        const err = new Error('progress query failed');
+        mockQuery.mockRejectedValueOnce(err);
+
+        const req = mockReq({
+            coupleRoom: {
+                id: 'uuid-room-1',
+                user_a_id: 'uuid-user-a',
+                user_b_id: 'uuid-user-b',
+            },
+        });
+        const res = mockRes();
+        const next = mockNext();
+
+        await getProgress(req, res, next);
 
         expect(next).toHaveBeenCalledWith(err);
     });
