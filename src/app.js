@@ -14,7 +14,7 @@ const { initDB, getPool } = require('./config/database');
 const { initFirebase } = require('./config/firebase');
 const { Server: SocketServer } = require('socket.io');
 const { initSocket } = require('./socket/socket.handler');
-const cleanupJobModule = require('./jobs/cleanup.job');
+const { startCleanupJob, startCodeCleanupJob } = require('./jobs/cleanup.job');
 const { errorHandler } = require('./middleware/errorHandler');
 const { auditRequest } = require('./middleware/audit.middleware');
 const { attachRequestId } = require('./middleware/request-id.middleware');
@@ -275,14 +275,9 @@ async function bootstrap() {
 
     // ── Cron Jobs (only when DB is reachable) ────────────────────────
     if (dbAvailable) {
-        const startCleanupJob = resolveJobFunction(cleanupJobModule, 'startCleanupJob');
-        const startCodeCleanupJob = resolveJobFunction(cleanupJobModule, 'startCodeCleanupJob');
-        const startPetDecayJob = resolveJobFunction(cleanupJobModule, 'startPetDecayJob');
-
-        startCleanupJob?.();
-        startCodeCleanupJob?.();
-        startPetDecayJob?.();
-        logger.info('✅ Cron jobs initialized (cleanup + pet decay)');
+        startCleanupJob();
+        startCodeCleanupJob();
+        logger.info('✅ Cron jobs initialized');
     } else {
         logger.warn('⚠️  Cron jobs skipped (no DB connection).');
     }
