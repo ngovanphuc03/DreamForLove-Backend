@@ -1,6 +1,7 @@
-const { query } = require('../config/database');
+const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 const { getIO } = require('../socket/socket.handler');
+const { awardLoveCoins, REWARD_PRESETS } = require('../services/loveCoinReward.service');
 
 // Premium limits removed — all features free for everyone
 
@@ -95,29 +96,71 @@ async function markBought(req, res, next) {
         const userId = req.dbUser.id;
         const desiredBought = req.body?.is_bought === false ? false : true;
 
-        const result = await query(
-            `UPDATE wish_items
-       SET is_bought = $3,
-           bought_at = CASE WHEN $3 THEN NOW() ELSE NULL END,
-           updated_at = NOW()
-       WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
-       RETURNING *`,
-            [id, roomId, desiredBought]
-        );
+        const txResult = await transaction(async (client) => {
+            const currentResult = await client.query(
+                `SELECT id, is_bought
+                 FROM wish_items
+                 WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+                 FOR UPDATE`,
+                [id, roomId]
+            );
 
-        if (!result.rows.length) {
+            if (!currentResult.rows.length) {
+                return { notFound: true };
+            }
+
+            const wasBought = currentResult.rows[0].is_bought === true;
+            const updatedResult = await client.query(
+                `UPDATE wish_items
+                 SET is_bought = $3,
+                     bought_at = CASE WHEN $3 THEN NOW() ELSE NULL END,
+                     updated_at = NOW()
+                 WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+                 RETURNING *`,
+                [id, roomId, desiredBought]
+            );
+
+            const item = updatedResult.rows[0];
+            let rewardResult = null;
+            if (!wasBought && desiredBought) {
+                rewardResult = await awardLoveCoins({
+                    client,
+                    coupleRoomId: roomId,
+                    rewardType: REWARD_PRESETS.wishlistBought.type,
+                    rewardKey: id,
+                    coins: REWARD_PRESETS.wishlistBought.coins,
+                    awardedBy: userId,
+                    metadata: {
+                        source: 'wishlist.markBought',
+                    },
+                });
+            }
+
+            return { item, rewardResult };
+        });
+
+        if (txResult.notFound) {
             return res.status(404).json({ error: 'Wish item not found' });
         }
+
+        const resultItem = txResult.item;
 
         const io = getIO();
         if (io) {
             io.to(`room:${roomId}`).except(`user:${userId}`).emit('wishlist:sync', {
                 action: 'update',
-                item: result.rows[0],
+                item: resultItem,
             });
+
+            if (txResult.rewardResult?.awardedCoins > 0) {
+                io.to(`room:${roomId}`).emit('pet:inventory_update', {
+                    loveCoins: txResult.rewardResult.loveCoins,
+                    inventory: txResult.rewardResult.inventory,
+                });
+            }
         }
 
-        res.json(result.rows[0]);
+        res.json(resultItem);
     } catch (err) {
         next(err);
     }

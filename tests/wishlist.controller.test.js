@@ -1,12 +1,14 @@
 /**
  * Wishlist Controller – Unit Tests
  */
-const { mockQuery, mockReq, mockRes, mockNext } = require('./setup');
+const { mockQuery, mockTransaction, mockReq, mockRes, mockNext } = require('./setup');
 const { list, create, markBought, remove } = require('../src/controllers/wishlist.controller');
 
 beforeEach(() => {
     jest.clearAllMocks();
     mockQuery.mockReset();
+    mockTransaction.mockReset();
+    mockTransaction.mockImplementation(async (cb) => cb({ query: mockQuery }));
 });
 
 describe('Wishlist Controller', () => {
@@ -89,9 +91,14 @@ describe('Wishlist Controller', () => {
     // ────────────────────────────────────────────────────────
     describe('PATCH /wishlist/:id/bought', () => {
         it('should mark item as bought', async () => {
-            mockQuery.mockResolvedValueOnce({
-                rows: [{ id: 'w1', is_bought: true }],
-            });
+            mockQuery
+                .mockResolvedValueOnce({ rows: [{ id: 'w1', is_bought: false }] }) // SELECT current
+                .mockResolvedValueOnce({ rows: [{ id: 'w1', is_bought: true }] }) // UPDATE item
+                .mockResolvedValueOnce({ rows: [{ love_coins: 20 }] }) // lock room
+                .mockResolvedValueOnce({ rows: [{ total: 0 }] }) // sum today
+                .mockResolvedValueOnce({ rows: [{ id: 'reward-1', coins_awarded: 5 }] }) // insert reward
+                .mockResolvedValueOnce({ rows: [{ love_coins: 25 }] }) // update coins
+                .mockResolvedValueOnce({ rows: [] }); // inventory
 
             const req = mockReq({ params: { id: 'w1' } });
             const res = mockRes();
@@ -99,15 +106,15 @@ describe('Wishlist Controller', () => {
 
             await markBought(req, res, next);
 
-            expect(mockQuery.mock.calls[0][0]).toMatch(/is_bought = \$3/);
-            expect(mockQuery.mock.calls[0][1][2]).toBe(true);
+            expect(mockQuery.mock.calls[1][0]).toMatch(/is_bought = \$3/);
+            expect(mockQuery.mock.calls[1][1][2]).toBe(true);
             expect(res.json).toHaveBeenCalledWith({ id: 'w1', is_bought: true });
         });
 
         it('should unmark item when is_bought=false', async () => {
-            mockQuery.mockResolvedValueOnce({
-                rows: [{ id: 'w1', is_bought: false, bought_at: null }],
-            });
+            mockQuery
+                .mockResolvedValueOnce({ rows: [{ id: 'w1', is_bought: true }] })
+                .mockResolvedValueOnce({ rows: [{ id: 'w1', is_bought: false, bought_at: null }] });
 
             const req = mockReq({
                 params: { id: 'w1' },
@@ -118,8 +125,8 @@ describe('Wishlist Controller', () => {
 
             await markBought(req, res, next);
 
-            const sql = mockQuery.mock.calls[0][0];
-            const params = mockQuery.mock.calls[0][1];
+            const sql = mockQuery.mock.calls[1][0];
+            const params = mockQuery.mock.calls[1][1];
             expect(sql).toMatch(/bought_at = CASE WHEN \$3 THEN NOW\(\) ELSE NULL END/);
             expect(params[2]).toBe(false);
             expect(res.json).toHaveBeenCalledWith({ id: 'w1', is_bought: false, bought_at: null });

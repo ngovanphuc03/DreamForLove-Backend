@@ -1,6 +1,7 @@
-const { query } = require('../config/database');
+const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 const { getIO } = require('../socket/socket.handler');
+const { awardLoveCoins, REWARD_PRESETS } = require('../services/loveCoinReward.service');
 
 // GET /api/trips?page=1&limit=20
 async function list(req, res, next) {
@@ -126,29 +127,73 @@ async function markDone(req, res, next) {
         const userId = req.dbUser.id;
         const done = req.body?.is_done === false ? false : true;
 
-        const result = await query(
-            `UPDATE trip_plans
-             SET is_done = $3
-             WHERE id = $1
-               AND couple_room_id = $2
-               AND is_deleted = FALSE
-             RETURNING *`,
-            [id, roomId, done]
-        );
+        const txResult = await transaction(async (client) => {
+            const currentResult = await client.query(
+                `SELECT id, is_done
+                 FROM trip_plans
+                 WHERE id = $1
+                   AND couple_room_id = $2
+                   AND is_deleted = FALSE
+                 FOR UPDATE`,
+                [id, roomId]
+            );
 
-        if (!result.rows.length) {
+            if (!currentResult.rows.length) {
+                return { notFound: true };
+            }
+
+            const wasDone = currentResult.rows[0].is_done === true;
+            const updatedResult = await client.query(
+                `UPDATE trip_plans
+                 SET is_done = $3
+                 WHERE id = $1
+                   AND couple_room_id = $2
+                   AND is_deleted = FALSE
+                 RETURNING *`,
+                [id, roomId, done]
+            );
+
+            const item = updatedResult.rows[0];
+            let rewardResult = null;
+            if (!wasDone && done) {
+                rewardResult = await awardLoveCoins({
+                    client,
+                    coupleRoomId: roomId,
+                    rewardType: REWARD_PRESETS.tripDone.type,
+                    rewardKey: id,
+                    coins: REWARD_PRESETS.tripDone.coins,
+                    awardedBy: userId,
+                    metadata: {
+                        source: 'trip.markDone',
+                    },
+                });
+            }
+
+            return { item, rewardResult };
+        });
+
+        if (txResult.notFound) {
             return res.status(404).json({ error: 'Trip plan not found' });
         }
+
+        const tripItem = txResult.item;
 
         const io = getIO();
         if (io) {
             io.to(`room:${roomId}`).except(`user:${userId}`).emit('trip:sync', {
                 action: 'update',
-                item: result.rows[0],
+                item: tripItem,
             });
+
+            if (txResult.rewardResult?.awardedCoins > 0) {
+                io.to(`room:${roomId}`).emit('pet:inventory_update', {
+                    loveCoins: txResult.rewardResult.loveCoins,
+                    inventory: txResult.rewardResult.inventory,
+                });
+            }
         }
 
-        res.json(result.rows[0]);
+        res.json(tripItem);
     } catch (err) {
         next(err);
     }

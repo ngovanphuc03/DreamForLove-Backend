@@ -89,6 +89,17 @@ describe('Error Handler', () => {
         expect(res.status).toHaveBeenCalledWith(400);
     });
 
+    it('should handle Postgres check violation (23514) with 400', () => {
+        const err = { code: '23514', message: 'check violated' };
+        const req = mockReq();
+        const res = mockRes();
+        const next = mockNext();
+
+        errorHandler(err, req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(400);
+    });
+
     it('should return 500 for unknown errors', () => {
         const err = new Error('kaboom');
         const req = mockReq();

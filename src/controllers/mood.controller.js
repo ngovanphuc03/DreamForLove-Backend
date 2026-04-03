@@ -1,7 +1,8 @@
-const { query } = require('../config/database');
+const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 const { sendPushNotification } = require('../config/firebase');
 const { getIO } = require('../socket/socket.handler');
+const { awardLoveCoins, REWARD_PRESETS } = require('../services/loveCoinReward.service');
 
 // GET /api/mood/current
 async function getCurrent(req, res, next) {
@@ -71,14 +72,65 @@ async function create(req, res, next) {
         const { id: roomId } = req.coupleRoom;
         const userId = req.dbUser.id;
 
-        const result = await query(
-            `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
-            [uuidv4(), roomId, userId, type, note || null]
-        );
+        const { entry, partner, rewardResult } = await transaction(async (client) => {
+            const inserted = await client.query(
+                `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note)
+                 VALUES ($1, $2, $3, $4, $5)
+                 RETURNING *`,
+                [uuidv4(), roomId, userId, type, note || null]
+            );
 
-        const entry = result.rows[0];
+            const moodEntry = inserted.rows[0];
+
+            const partnerResult = await client.query(
+                `SELECT u.id, u.fcm_token, u.display_name
+                 FROM couple_rooms cr
+                 JOIN users u ON (
+                   CASE WHEN cr.user_a_id = $1 THEN cr.user_b_id ELSE cr.user_a_id END = u.id
+                 )
+                 WHERE cr.id = $2`,
+                [userId, roomId]
+            );
+
+            const partnerData = partnerResult.rows[0] || null;
+
+            let reward = null;
+            if (partnerData?.id) {
+                const qualifiedResult = await client.query(
+                    `SELECT
+                        COALESCE(BOOL_OR(user_id = $2), FALSE) AS me_done,
+                        COALESCE(BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid), FALSE) AS partner_done,
+                        CURRENT_DATE::text AS day_key
+                     FROM mood_logs
+                     WHERE couple_room_id = $1
+                       AND (created_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+                    [roomId, userId, partnerData.id]
+                );
+
+                const row = qualifiedResult.rows[0] || {};
+                const qualifiedToday = row.me_done === true && row.partner_done === true;
+                if (qualifiedToday) {
+                    reward = await awardLoveCoins({
+                        client,
+                        coupleRoomId: roomId,
+                        rewardType: REWARD_PRESETS.moodDailyPair.type,
+                        rewardKey: row.day_key,
+                        coins: REWARD_PRESETS.moodDailyPair.coins,
+                        awardedBy: userId,
+                        metadata: {
+                            source: 'mood.create',
+                            type,
+                        },
+                    });
+                }
+            }
+
+            return {
+                entry: moodEntry,
+                partner: partnerData,
+                rewardResult: reward,
+            };
+        });
 
         // ── Emit real-time to partner ─────────────────────────
         const io = getIO();
@@ -87,19 +139,16 @@ async function create(req, res, next) {
                 'partner_mood_update',
                 entry
             );
+
+            if (rewardResult?.awardedCoins > 0) {
+                io.to(`room:${roomId}`).emit('pet:inventory_update', {
+                    loveCoins: rewardResult.loveCoins,
+                    inventory: rewardResult.inventory,
+                });
+            }
         }
 
         // ── Push notification if partner offline ──────────────
-        const partnerResult = await query(
-            `SELECT u.fcm_token, u.display_name
-       FROM couple_rooms cr
-       JOIN users u ON (
-         CASE WHEN cr.user_a_id = $1 THEN cr.user_b_id ELSE cr.user_a_id END = u.id
-       )
-       WHERE cr.id = $2`,
-            [userId, roomId]
-        );
-        const partner = partnerResult.rows[0];
         if (partner?.fcm_token) {
             const senderName = req.dbUser?.display_name || 'Bạn ơi';
             const moodEmoji = { happy: '😊', sad: '😢', miss: '🥺', angry: '😤', love: '🥰' };

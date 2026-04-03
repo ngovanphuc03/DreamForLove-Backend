@@ -4,6 +4,7 @@ const logger = require('../config/logger');
 
 /// Map of userId → Set of socket IDs (a user can have multiple sockets)
 const onlineUsers = new Map();
+const socketMeta = new Map(); // socketId -> { userId, coupleRoomId, displayName }
 const pingRateTracker = new Map();
 
 const PING_RATE_WINDOW_MS = 60 * 1000;
@@ -71,6 +72,12 @@ function initSocket(io) {
         const userId = socket.dbUser.id;
         logger.info(`[Socket] User connected: ${userId} (${socket.id})`);
 
+        socketMeta.set(socket.id, {
+            userId,
+            coupleRoomId: socket.coupleRoomId || null,
+            displayName: socket.dbUser.display_name,
+        });
+
         // Track online presence
         if (!onlineUsers.has(userId)) onlineUsers.set(userId, new Set());
         onlineUsers.get(userId).add(socket.id);
@@ -105,6 +112,11 @@ function initSocket(io) {
                 }
                 socket.coupleRoomId = coupleRoomId;
                 socket.join(`room:${coupleRoomId}`);
+                socketMeta.set(socket.id, {
+                    userId,
+                    coupleRoomId,
+                    displayName: socket.dbUser.display_name,
+                });
                 logger.info(`[Socket] User ${userId} dynamically joined room ${coupleRoomId}`);
                 socket.to(`room:${coupleRoomId}`).emit('partner:online', {
                     userId,
@@ -146,6 +158,64 @@ function initSocket(io) {
         socket.on('food:changed', ({ action, item }) => {
             if (!socket.coupleRoomId) return;
             socket.to(`room:${socket.coupleRoomId}`).emit('food:sync', { action, item });
+        });
+
+        // ── Event: pet care action (socket alternative to REST) ──────────────────
+        socket.on('pet:action', async (payload = {}) => {
+            const action = payload?.action;
+            const itemId = typeof payload?.itemId === 'string' ? payload.itemId : null;
+            if (!socket.coupleRoomId) {
+                return socket.emit('error', { message: 'Not in a couple room' });
+            }
+            const validActions = ['feed', 'pet', 'bathe', 'play'];
+            if (!validActions.includes(action)) {
+                return socket.emit('error', { message: `Invalid action: ${action}` });
+            }
+            try {
+                // Reuse REST controller logic so socket path and HTTP path stay consistent.
+                const petCtrl = require('../controllers/pet.controller');
+                const req = {
+                    params: { action },
+                    body: itemId ? { itemId } : {},
+                    coupleRoom: { id: socket.coupleRoomId },
+                    dbUser: socket.dbUser,
+                };
+
+                const res = {
+                    _status: 200,
+                    _payload: null,
+                    status(code) {
+                        this._status = code;
+                        return this;
+                    },
+                    json(payload) {
+                        this._payload = payload;
+                        return this;
+                    },
+                };
+
+                let handlerError = null;
+                await petCtrl.performAction(req, res, (err) => {
+                    handlerError = err;
+                });
+
+                if (handlerError) {
+                    throw handlerError;
+                }
+
+                if (res._status >= 400) {
+                    const message = res._payload?.error || 'Lỗi khi chăm sóc pet';
+                    return socket.emit('pet:action:error', { action, message });
+                }
+
+                socket.emit('pet:action:ok', {
+                    action,
+                    meta: res._payload?.meta || null,
+                });
+            } catch (err) {
+                logger.error(`[Socket] pet:action error: ${err.message}`);
+                socket.emit('pet:action:error', { action, message: 'Lỗi khi chăm sóc pet' });
+            }
         });
 
         // ── Event: request partner presence snapshot ───────────────────────────
@@ -326,6 +396,7 @@ function initSocket(io) {
         // ── Disconnect ───────────────────────────────────────────────────────────
         socket.on('disconnect', () => {
             logger.info(`[Socket] User disconnected: ${userId} (${socket.id})`);
+            socketMeta.delete(socket.id);
             const sockets = onlineUsers.get(userId);
             if (sockets) {
                 sockets.delete(socket.id);
@@ -355,15 +426,24 @@ setInterval(() => {
     let cleaned = 0;
     const now = Date.now();
     for (const [userId, sockets] of onlineUsers.entries()) {
+        let removedMeta = null;
         for (const socketId of sockets) {
             // Check if socket actually exists in the IO instance
             if (!ioInstance.sockets.sockets.has(socketId)) {
+                removedMeta = socketMeta.get(socketId) || removedMeta;
+                socketMeta.delete(socketId);
                 sockets.delete(socketId);
                 cleaned++;
             }
         }
         if (sockets.size === 0) {
             onlineUsers.delete(userId);
+            if (removedMeta?.coupleRoomId) {
+                ioInstance.to(`room:${removedMeta.coupleRoomId}`).emit('partner:offline', {
+                    userId,
+                    displayName: removedMeta.displayName,
+                });
+            }
         }
     }
 
@@ -376,6 +456,6 @@ setInterval(() => {
     if (cleaned > 0) {
         logger.debug(`[Socket] Periodic Cleanup: Removed ${cleaned} zombie connections.`);
     }
-}, 60000); // 1 minute
+}, 15000); // 15 seconds
 
 module.exports = { initSocket, isUserOnline, getIO };
