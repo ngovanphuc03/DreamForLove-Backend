@@ -14,12 +14,22 @@ const { initDB, getPool } = require('./config/database');
 const { initFirebase } = require('./config/firebase');
 const { Server: SocketServer } = require('socket.io');
 const { initSocket } = require('./socket/socket.handler');
-const { startCleanupJob, startCodeCleanupJob } = require('./jobs/cleanup.job');
+const cleanupJobModule = require('./jobs/cleanup.job');
 const { errorHandler } = require('./middleware/errorHandler');
 const { auditRequest } = require('./middleware/audit.middleware');
 const { attachRequestId } = require('./middleware/request-id.middleware');
 const routes = require('./routes');
 const logger = require('./config/logger');
+
+function resolveJobFunction(moduleRef, fnName) {
+    const fn = moduleRef?.[fnName];
+    if (typeof fn === 'function') {
+        return fn;
+    }
+
+    logger.warn(`[Cron] ${fnName} is not a function (received: ${typeof fn}). Cron task will be skipped.`);
+    return null;
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -58,8 +68,9 @@ const io = new SocketServer(server, {
         credentials: true,
     },
     transports: ['websocket', 'polling'],
-    pingInterval: 25000,
-    pingTimeout: 20000,
+    // Faster stale-connection detection for more accurate online/offline presence.
+    pingInterval: 10000,
+    pingTimeout: 10000,
 });
 
 // ── Security ─────────────────────────────────────────────────
@@ -264,9 +275,14 @@ async function bootstrap() {
 
     // ── Cron Jobs (only when DB is reachable) ────────────────────────
     if (dbAvailable) {
-        startCleanupJob();
-        startCodeCleanupJob();
-        logger.info('✅ Cron jobs initialized');
+        const startCleanupJob = resolveJobFunction(cleanupJobModule, 'startCleanupJob');
+        const startCodeCleanupJob = resolveJobFunction(cleanupJobModule, 'startCodeCleanupJob');
+        const startPetDecayJob = resolveJobFunction(cleanupJobModule, 'startPetDecayJob');
+
+        startCleanupJob?.();
+        startCodeCleanupJob?.();
+        startPetDecayJob?.();
+        logger.info('✅ Cron jobs initialized (cleanup + pet decay)');
     } else {
         logger.warn('⚠️  Cron jobs skipped (no DB connection).');
     }

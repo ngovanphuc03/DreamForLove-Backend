@@ -1,11 +1,14 @@
 /**
  * Mood Controller – Unit Tests
  */
-const { mockQuery, mockReq, mockRes, mockNext } = require('./setup');
+const { mockQuery, mockTransaction, mockReq, mockRes, mockNext } = require('./setup');
 const { getCurrent, getHistory, create } = require('../src/controllers/mood.controller');
 
 beforeEach(() => {
     jest.clearAllMocks();
+    mockQuery.mockReset();
+    mockTransaction.mockReset();
+    mockTransaction.mockImplementation(async (cb) => cb({ query: mockQuery }));
 });
 
 describe('Mood Controller', () => {
@@ -97,7 +100,7 @@ describe('Mood Controller', () => {
             const entry = { id: 'mood-1', type: 'love', user_id: 'uuid-user-a' };
             mockQuery
                 .mockResolvedValueOnce({ rows: [entry] })  // INSERT
-                .mockResolvedValueOnce({ rows: [{ fcm_token: 'token123', display_name: 'Partner' }] }); // partner query
+                .mockResolvedValueOnce({ rows: [] }); // partner query
 
             const req = mockReq({ body: { type: 'love', note: 'Yêu em ❤️' } });
             const res = mockRes();
@@ -107,6 +110,31 @@ describe('Mood Controller', () => {
 
             expect(res.status).toHaveBeenCalledWith(201);
             expect(res.json).toHaveBeenCalledWith(entry);
+        });
+
+        it('should award coins once when both partners completed today mood', async () => {
+            const entry = { id: 'mood-2', type: 'happy', user_id: 'uuid-user-a' };
+            mockQuery
+                .mockResolvedValueOnce({ rows: [entry] }) // INSERT mood
+                .mockResolvedValueOnce({ rows: [{ id: 'uuid-user-b', fcm_token: null, display_name: 'Partner' }] }) // partner lookup
+                .mockResolvedValueOnce({ rows: [{ me_done: true, partner_done: true, day_key: '2026-04-03' }] }) // qualified check
+                .mockResolvedValueOnce({ rows: [{ love_coins: 50 }] }) // lock room
+                .mockResolvedValueOnce({ rows: [{ total: 0 }] }) // today awarded
+                .mockResolvedValueOnce({ rows: [{ id: 'reward-1', coins_awarded: 8 }] }) // insert reward log
+                .mockResolvedValueOnce({ rows: [{ love_coins: 58 }] }) // update room coins
+                .mockResolvedValueOnce({ rows: [] }); // inventory
+
+            const req = mockReq({ body: { type: 'happy' } });
+            const res = mockRes();
+            const next = mockNext();
+
+            await create(req, res, next);
+
+            const sqlCalls = mockQuery.mock.calls.map(call => call[0]);
+            expect(sqlCalls.some(sql => /INSERT INTO coin_reward_logs/.test(sql))).toBe(true);
+            expect(sqlCalls.some(sql => /UPDATE couple_rooms SET love_coins = love_coins \+/.test(sql))).toBe(true);
+            expect(res.status).toHaveBeenCalledWith(201);
+            expect(next).not.toHaveBeenCalled();
         });
 
         it('should propagate database errors', async () => {

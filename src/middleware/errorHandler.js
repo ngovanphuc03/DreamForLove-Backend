@@ -37,6 +37,14 @@ function errorHandler(err, req, res, next) {  // eslint-disable-line no-unused-v
         return res.status(400).json({ error: 'Referenced resource does not exist' });
     }
 
+    // Postgres check-violation (23514)
+    if (err.code === '23514') {
+        return res.status(400).json({
+            error: 'Invalid value violates data constraint',
+            request_id: req.requestId || null,
+        });
+    }
+
     // Known operational error with explicit statusCode
     if (err.statusCode && err.statusCode < 500) {
         return res.status(err.statusCode).json({ error: err.message, request_id: req.requestId || null });
