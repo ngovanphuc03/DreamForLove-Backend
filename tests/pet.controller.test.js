@@ -176,22 +176,89 @@ describe('Pet Controller', () => {
     });
 
     describe('POST /couple/pet/:action (feed item selection)', () => {
+        function setupFeedActionMocks({ petBefore, petAfter, inventoryCheckRows, inventoryAfterRows }) {
+            mockQuery.mockImplementation((sql, params) => {
+                const text = String(sql).replace(/\s+/g, ' ').trim();
+
+                if (text.includes('SELECT * FROM couple_pet WHERE couple_room_id = $1')) {
+                    return Promise.resolve({ rows: [petBefore] });
+                }
+
+                if (text.includes('SELECT id FROM couple_rooms WHERE id = $1 FOR UPDATE')) {
+                    return Promise.resolve({ rows: [{ id: 'room-1' }] });
+                }
+
+                if (text.includes('FROM pet_inventory') && text.includes('item_id = ANY($2::varchar[])')) {
+                    return Promise.resolve({ rows: inventoryCheckRows });
+                }
+
+                if (text.includes('UPDATE pet_inventory') && text.includes('quantity = quantity - 1')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                if (text.includes('SELECT COUNT(*)::int AS cnt FROM pet_care_actions') && text.includes('AND user_id = $2')) {
+                    const uid = params?.[1];
+                    return Promise.resolve({ rows: [{ cnt: uid === 'uuid-user-a' ? 1 : 0 }] });
+                }
+
+                if (text.includes('SELECT user_a_id FROM couple_rooms WHERE id = $1')) {
+                    return Promise.resolve({ rows: [{ user_a_id: 'uuid-user-a' }] });
+                }
+
+                if (text.includes('UPDATE couple_pet') && text.includes('RETURNING *')) {
+                    return Promise.resolve({ rows: [petAfter] });
+                }
+
+                if (text.includes('INSERT INTO pet_care_actions')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                if (text.includes('COUNT(DISTINCT user_id)::int AS contributors')) {
+                    return Promise.resolve({ rows: [{ contributors: 1 }] });
+                }
+
+                if (text.includes('INSERT INTO coin_reward_logs')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                if (text.includes('UPDATE couple_rooms SET love_coins = love_coins + $2 WHERE id = $1')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                if (text.includes('SELECT CASE') && text.includes('AS partner_id')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                if (text.includes('SELECT love_coins FROM couple_rooms WHERE id = $1')) {
+                    return Promise.resolve({ rows: [{ love_coins: 150 }] });
+                }
+
+                if (text.includes('SELECT item_id, quantity FROM pet_inventory WHERE couple_room_id = $1')) {
+                    return Promise.resolve({ rows: inventoryAfterRows });
+                }
+
+                if (text.includes('SELECT (created_at AT TIME ZONE') || text.includes('FROM pet_expeditions')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                if (text.includes('INSERT INTO pet_achievements') || text.includes('UPDATE pet_achievements')) {
+                    return Promise.resolve({ rows: [] });
+                }
+
+                return Promise.resolve({ rows: [] });
+            });
+        }
+
         it('should consume basic_food when itemId is explicitly basic_food', async () => {
             const petBefore = makePetState();
             const petAfter = makePetState({ hunger: 70, health: 80, total_love_xp: 125 });
 
-            mockQuery
-                .mockResolvedValueOnce({ rows: [petBefore] }) // ensurePet
-                .mockResolvedValueOnce({ rows: [{ item_id: 'basic_food', quantity: 2 }] }) // inventory check
-                .mockResolvedValueOnce({ rows: [] }) // consume item
-                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // my actions today
-                .mockResolvedValueOnce({ rows: [{ user_a_id: 'uuid-user-a' }] }) // is user A
-                .mockResolvedValueOnce({ rows: [petAfter] }) // update pet
-                .mockResolvedValueOnce({ rows: [] }) // action log
-                .mockResolvedValueOnce({ rows: [] }) // partner lookup in transaction
-                .mockResolvedValueOnce({ rows: [{ love_coins: 150 }] }) // room coins
-                .mockResolvedValueOnce({ rows: [{ item_id: 'basic_food', quantity: 1 }] }) // inventory after
-                .mockResolvedValueOnce({ rows: [] }); // partner lookup for socket emit
+            setupFeedActionMocks({
+                petBefore,
+                petAfter,
+                inventoryCheckRows: [{ item_id: 'basic_food', quantity: 2 }],
+                inventoryAfterRows: [{ item_id: 'basic_food', quantity: 1 }],
+            });
 
             const req = mockReq({
                 params: { action: 'feed' },
@@ -204,13 +271,17 @@ describe('Pet Controller', () => {
 
             await performAction(req, res, next);
 
+            expect(res.json).toHaveBeenCalled();
             const response = res.json.mock.calls[0][0];
             expect(response.meta).toEqual(expect.objectContaining({
                 action: 'feed',
                 consumedItemId: 'basic_food',
             }));
 
-            const preferredItems = mockQuery.mock.calls[1][1][1];
+            const inventoryCheckCall = mockQuery.mock.calls.find((call) =>
+                String(call[0]).includes('item_id = ANY($2::varchar[])')
+            );
+            const preferredItems = inventoryCheckCall?.[1]?.[1];
             expect(preferredItems).toEqual(['basic_food']);
             expect(next).not.toHaveBeenCalled();
         });
@@ -219,18 +290,12 @@ describe('Pet Controller', () => {
             const petBefore = makePetState();
             const petAfter = makePetState({ hunger: 70, health: 80, total_love_xp: 125 });
 
-            mockQuery
-                .mockResolvedValueOnce({ rows: [petBefore] }) // ensurePet
-                .mockResolvedValueOnce({ rows: [{ item_id: 'premium_food', quantity: 1 }] }) // inventory check
-                .mockResolvedValueOnce({ rows: [] }) // consume item
-                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // my actions today
-                .mockResolvedValueOnce({ rows: [{ user_a_id: 'uuid-user-a' }] }) // is user A
-                .mockResolvedValueOnce({ rows: [petAfter] }) // update pet
-                .mockResolvedValueOnce({ rows: [] }) // action log
-                .mockResolvedValueOnce({ rows: [] }) // partner lookup in transaction
-                .mockResolvedValueOnce({ rows: [{ love_coins: 150 }] }) // room coins
-                .mockResolvedValueOnce({ rows: [{ item_id: 'premium_food', quantity: 0 }] }) // inventory after
-                .mockResolvedValueOnce({ rows: [] }); // partner lookup for socket emit
+            setupFeedActionMocks({
+                petBefore,
+                petAfter,
+                inventoryCheckRows: [{ item_id: 'premium_food', quantity: 1 }],
+                inventoryAfterRows: [{ item_id: 'premium_food', quantity: 0 }],
+            });
 
             const req = mockReq({
                 params: { action: 'feed' },
@@ -243,13 +308,17 @@ describe('Pet Controller', () => {
 
             await performAction(req, res, next);
 
+            expect(res.json).toHaveBeenCalled();
             const response = res.json.mock.calls[0][0];
             expect(response.meta).toEqual(expect.objectContaining({
                 action: 'feed',
                 consumedItemId: 'premium_food',
             }));
 
-            const preferredItems = mockQuery.mock.calls[1][1][1];
+            const inventoryCheckCall = mockQuery.mock.calls.find((call) =>
+                String(call[0]).includes('item_id = ANY($2::varchar[])')
+            );
+            const preferredItems = inventoryCheckCall?.[1]?.[1];
             expect(preferredItems).toEqual(['premium_food']);
             expect(next).not.toHaveBeenCalled();
         });
@@ -258,18 +327,12 @@ describe('Pet Controller', () => {
             const petBefore = makePetState();
             const petAfter = makePetState({ hunger: 70, health: 80, total_love_xp: 125 });
 
-            mockQuery
-                .mockResolvedValueOnce({ rows: [petBefore] }) // ensurePet
-                .mockResolvedValueOnce({ rows: [{ item_id: 'premium_food', quantity: 2 }] }) // inventory check
-                .mockResolvedValueOnce({ rows: [] }) // consume item
-                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // my actions today
-                .mockResolvedValueOnce({ rows: [{ user_a_id: 'uuid-user-a' }] }) // is user A
-                .mockResolvedValueOnce({ rows: [petAfter] }) // update pet
-                .mockResolvedValueOnce({ rows: [] }) // action log
-                .mockResolvedValueOnce({ rows: [] }) // partner lookup in transaction
-                .mockResolvedValueOnce({ rows: [{ love_coins: 150 }] }) // room coins
-                .mockResolvedValueOnce({ rows: [{ item_id: 'premium_food', quantity: 1 }] }) // inventory after
-                .mockResolvedValueOnce({ rows: [] }); // partner lookup for socket emit
+            setupFeedActionMocks({
+                petBefore,
+                petAfter,
+                inventoryCheckRows: [{ item_id: 'premium_food', quantity: 2 }],
+                inventoryAfterRows: [{ item_id: 'premium_food', quantity: 1 }],
+            });
 
             const req = mockReq({
                 params: { action: 'feed' },
@@ -282,13 +345,17 @@ describe('Pet Controller', () => {
 
             await performAction(req, res, next);
 
+            expect(res.json).toHaveBeenCalled();
             const response = res.json.mock.calls[0][0];
             expect(response.meta).toEqual(expect.objectContaining({
                 action: 'feed',
                 consumedItemId: 'premium_food',
             }));
 
-            const preferredItems = mockQuery.mock.calls[1][1][1];
+            const inventoryCheckCall = mockQuery.mock.calls.find((call) =>
+                String(call[0]).includes('item_id = ANY($2::varchar[])')
+            );
+            const preferredItems = inventoryCheckCall?.[1]?.[1];
             expect(preferredItems).toEqual(['basic_food', 'premium_food']);
             expect(next).not.toHaveBeenCalled();
         });
