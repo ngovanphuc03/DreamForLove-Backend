@@ -83,13 +83,6 @@ router.post('/expedition/start', [
 router.get('/expedition/status', petCtrl.getExpeditionStatus);
 router.post('/expedition/collect', petCtrl.collectExpeditionLoot);
 
-// ── Daily Quest Routes ───────────────────────────────────────
-router.get('/daily-quests', petCtrl.getDailyQuests);
-router.post('/daily-quests/claim', petCtrl.claimDailyQuestReward);
-
-// ── Personality Routes ───────────────────────────────────────
-router.get('/personality', petCtrl.getPetPersonality);
-
 // ── Achievements Routes ─────────────────────────────────────
 router.get('/achievements', petCtrl.getAchievements);
 
