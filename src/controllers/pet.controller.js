@@ -43,6 +43,54 @@ const FEED_ITEM_IDS = ['basic_food', 'premium_food'];
 const VALID_ACTIONS = Object.keys(ACTION_CONFIG);
 const COOPERATIVE_BONUS_XP = 25;
 
+const PET_DAILY_QUEST_REWARD_COINS = 36;
+const PET_DAILY_QUEST_DEFINITIONS = [
+    {
+        id: 'self_care_3',
+        icon: '🍖',
+        title: 'Tự chăm pet 3 lần',
+        description: 'Bạn thực hiện tối thiểu 3 hành động chăm pet trong ngày',
+        target: 3,
+    },
+    {
+        id: 'both_contribute',
+        icon: '💞',
+        title: 'Cả hai cùng chăm pet',
+        description: 'Mỗi người ít nhất 1 hành động chăm pet trong ngày',
+        target: 1,
+    },
+    {
+        id: 'avg_stat_75',
+        icon: '✨',
+        title: 'Giữ chỉ số trung bình ≥ 75',
+        description: 'Giữ trung bình 4 chỉ số của pet đạt từ 75 điểm',
+        target: 75,
+    },
+    {
+        id: 'expedition_collected_1',
+        icon: '🗺️',
+        title: 'Hoàn thành 1 viễn chinh',
+        description: 'Thu thập thưởng từ ít nhất 1 chuyến viễn chinh trong ngày',
+        target: 1,
+    },
+];
+
+const PERSONALITY_TRAIT_LABELS = {
+    consistency: 'Nhịp Chăm Đều',
+    teamwork: 'Phối Hợp Cặp Đôi',
+    nurturing: 'Ưu Tiên Cho Ăn',
+    playful: 'Độ Ham Chơi',
+    hygiene: 'Độ Sạch Sẽ',
+    affection: 'Độ Vuốt Ve',
+    explorer: 'Tinh Thần Viễn Chinh',
+    shopper: 'Năng Lực Tích Lũy',
+    balance: 'Cân Bằng Âm Dương',
+    vitality: 'Sinh Lực Hiện Tại',
+    devotion: 'Độ Chăm Bền Bỉ',
+    discipline: 'Kỷ Luật Chăm Sóc',
+    moodCare: 'Quan Tâm Cảm Xúc',
+};
+
 // Decay: −3 per stat for every 4 hours of inactivity
 const DECAY_INTERVAL_HOURS = 4;
 const DECAY_PER_INTERVAL = 3;
@@ -73,6 +121,499 @@ function computeXpToNextLevel(totalXp) {
 
 function toUTCDateKey(date = new Date()) {
     return date.toISOString().slice(0, 10);
+}
+
+function getDailyQuestRewardKey(date = new Date()) {
+    return `pet_daily_quest_${toUTCDateKey(date)}`;
+}
+
+function buildDailyQuestItems({ myActionsToday, partnerActionsToday, averageStat, expeditionsCollectedToday }) {
+    const bothContributed = myActionsToday > 0 && partnerActionsToday > 0;
+
+    return PET_DAILY_QUEST_DEFINITIONS.map((def) => {
+        let progress = 0;
+
+        switch (def.id) {
+            case 'self_care_3':
+                progress = myActionsToday;
+                break;
+            case 'both_contribute':
+                progress = bothContributed ? 1 : 0;
+                break;
+            case 'avg_stat_75':
+                progress = averageStat;
+                break;
+            case 'expedition_collected_1':
+                progress = expeditionsCollectedToday;
+                break;
+            default:
+                progress = 0;
+                break;
+        }
+
+        const normalizedProgress = Math.max(0, Math.min(progress, def.target));
+
+        return {
+            id: def.id,
+            icon: def.icon,
+            title: def.title,
+            description: def.description,
+            progress: normalizedProgress,
+            target: def.target,
+            isCompleted: normalizedProgress >= def.target,
+        };
+    });
+}
+
+async function getDailyQuestSnapshot(coupleRoomId, userId, client, context = {}) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    const pet = context.pet || await ensurePet(coupleRoomId, client);
+    const partnerId = context.partnerId !== undefined
+        ? context.partnerId
+        : await getPartnerId(coupleRoomId, userId, client);
+
+    const myActionsToday = context.myActionsToday !== undefined
+        ? context.myActionsToday
+        : await countTodayActions(coupleRoomId, userId, client);
+
+    const partnerActionsToday = context.partnerActionsToday !== undefined
+        ? context.partnerActionsToday
+        : (partnerId ? await countTodayActions(coupleRoomId, partnerId, client) : 0);
+
+    let expeditionsCollectedToday = 0;
+    try {
+        const expeditionRes = await qFn(
+            `SELECT COUNT(*)::int AS cnt
+             FROM pet_expeditions
+             WHERE couple_room_id = $1
+               AND status = 'collected'
+               AND collected_at IS NOT NULL
+               AND (collected_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+            [coupleRoomId]
+        );
+        expeditionsCollectedToday = expeditionRes.rows[0]?.cnt || 0;
+    } catch (err) {
+        // Backward compatibility when expedition table is unavailable.
+        if (err.code !== '42P01') throw err;
+    }
+
+    const averageStat = Math.round(
+        ((pet.health || 0) + (pet.mood || 0) + (pet.hunger || 0) + (pet.cleanliness || 0)) / 4
+    );
+
+    const quests = buildDailyQuestItems({
+        myActionsToday,
+        partnerActionsToday,
+        averageStat,
+        expeditionsCollectedToday,
+    });
+
+    const completedCount = quests.filter((quest) => quest.isCompleted).length;
+    const rewardKey = getDailyQuestRewardKey();
+
+    let claimed = false;
+    try {
+        const claimRes = await qFn(
+            `SELECT 1
+             FROM coin_reward_logs
+             WHERE couple_room_id = $1
+               AND reward_type = 'pet_daily_quest'
+               AND reward_key = $2
+             LIMIT 1`,
+            [coupleRoomId, rewardKey]
+        );
+        claimed = claimRes.rows.length > 0;
+    } catch (err) {
+        // Backward compatibility when reward ledger has not been migrated yet.
+        if (err.code !== '42P01') throw err;
+        claimed = false;
+    }
+
+    return {
+        dateKey: toUTCDateKey(),
+        rewardKey,
+        rewardCoins: PET_DAILY_QUEST_REWARD_COINS,
+        claimed,
+        completedCount,
+        totalCount: quests.length,
+        canClaim: !claimed && completedCount === quests.length,
+        quests,
+    };
+}
+
+function safeInt(value, fallback = 0) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.trunc(value);
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function clampPercent(value) {
+    return Math.max(0, Math.min(100, Math.round(value || 0)));
+}
+
+function hashToUnitInterval(input) {
+    const text = String(input || '');
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+        hash ^= text.charCodeAt(i);
+        hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return ((hash >>> 0) % 1000000) / 1000000;
+}
+
+function buildDefaultPersonalityMetrics(pet) {
+    const vitality = clampPercent(
+        ((safeInt(pet?.health) + safeInt(pet?.mood) + safeInt(pet?.hunger) + safeInt(pet?.cleanliness)) / 4)
+    );
+
+    return {
+        consistency: 0,
+        teamwork: 0,
+        nurturing: 0,
+        playful: 0,
+        hygiene: 0,
+        affection: 0,
+        explorer: 0,
+        shopper: 0,
+        balance: 0,
+        vitality,
+        devotion: 0,
+        discipline: 50,
+        moodCare: clampPercent(safeInt(pet?.mood, 0)),
+    };
+}
+
+function getPersonalityRequirementPenalty(definition, metrics) {
+    const requirements = definition.requirements || {};
+    let penalty = 0;
+
+    for (const [rawKey, value] of Object.entries(requirements)) {
+        const threshold = Number(value);
+        if (!Number.isFinite(threshold)) continue;
+
+        if (rawKey.endsWith('Min')) {
+            const key = rawKey.slice(0, -3);
+            if ((metrics[key] ?? 0) < threshold) {
+                penalty += (threshold - (metrics[key] ?? 0)) * 0.9;
+            }
+        } else if (rawKey.endsWith('Max')) {
+            const key = rawKey.slice(0, -3);
+            if ((metrics[key] ?? 0) > threshold) {
+                penalty += ((metrics[key] ?? 0) - threshold) * 0.9;
+            }
+        }
+    }
+
+    return penalty;
+}
+
+function scorePersonality(definition, metrics, roomSeed) {
+    let score = 8;
+
+    for (const [metric, weight] of Object.entries(definition.weights || {})) {
+        const numericWeight = Number(weight);
+        if (!Number.isFinite(numericWeight)) continue;
+        score += (metrics[metric] || 0) * numericWeight;
+    }
+
+    score -= getPersonalityRequirementPenalty(definition, metrics);
+
+    // Stable tie-breaker so each couple feels unique even with close behavior.
+    const jitter = (hashToUnitInterval(`${roomSeed}:${definition.id}`) - 0.5) * 8;
+    score += jitter;
+
+    return Math.max(0, score);
+}
+
+function buildDominantTraits(metrics) {
+    return Object.entries(metrics)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([id, value]) => ({
+            id,
+            label: PERSONALITY_TRAIT_LABELS[id] || id,
+            value: clampPercent(value),
+        }));
+}
+
+function buildSkillState(pet, skill) {
+    if (!skill) {
+        return {
+            isReady: true,
+            readyAt: null,
+            lastTriggeredAt: null,
+            cooldownMinutes: 0,
+            remainingSeconds: 0,
+        };
+    }
+
+    const cooldownMinutes = Math.max(1, safeInt(skill.cooldownMinutes, 120));
+    const lastTriggeredAt = pet?.personality_skill_last_triggered_at
+        ? new Date(pet.personality_skill_last_triggered_at)
+        : null;
+
+    if (!lastTriggeredAt || Number.isNaN(lastTriggeredAt.getTime())) {
+        return {
+            isReady: true,
+            readyAt: null,
+            lastTriggeredAt: null,
+            cooldownMinutes,
+            remainingSeconds: 0,
+        };
+    }
+
+    const readyAtDate = new Date(lastTriggeredAt.getTime() + (cooldownMinutes * 60 * 1000));
+    const now = Date.now();
+    const remainingMs = readyAtDate.getTime() - now;
+    const isReady = remainingMs <= 0;
+
+    return {
+        isReady,
+        readyAt: readyAtDate.toISOString(),
+        lastTriggeredAt: lastTriggeredAt.toISOString(),
+        cooldownMinutes,
+        remainingSeconds: isReady ? 0 : Math.ceil(remainingMs / 1000),
+    };
+}
+
+function buildPersonalitySnapshotFromMetrics({ pet, metrics, roomSeed, lookbackDays = PERSONALITY_LOOKBACK_DAYS }) {
+    const scored = PET_PERSONALITY_DEFINITIONS
+        .map((definition) => ({
+            ...definition,
+            rawScore: scorePersonality(definition, metrics, roomSeed),
+        }))
+        .sort((a, b) => b.rawScore - a.rawScore);
+
+    const maxRaw = scored[0]?.rawScore ?? 1;
+    const minRaw = scored[scored.length - 1]?.rawScore ?? 0;
+    const range = Math.max(maxRaw - minRaw, 0.0001);
+
+    const personalities = scored.map((entry, index) => {
+        const resonance = clampPercent(((entry.rawScore - minRaw) / range) * 100);
+        return {
+            id: entry.id,
+            emoji: entry.emoji,
+            name: entry.name,
+            description: entry.description,
+            resonance,
+            isActive: index === 0,
+            requirements: entry.requirements || {},
+            skill: {
+                id: entry.skill?.id,
+                name: entry.skill?.name,
+                description: entry.skill?.description,
+                triggerActions: Array.isArray(entry.skill?.triggerActions)
+                    ? entry.skill.triggerActions
+                    : [],
+                cooldownMinutes: Math.max(1, safeInt(entry.skill?.cooldownMinutes, 120)),
+                bonusStats: entry.skill?.bonusStats || {},
+                bonusXp: safeInt(entry.skill?.bonusXp, 0),
+                bonusCoins: safeInt(entry.skill?.bonusCoins, 0),
+            },
+        };
+    });
+
+    const active = personalities[0] || null;
+    const skillState = buildSkillState(pet, active?.skill);
+
+    return {
+        generatedAt: new Date().toISOString(),
+        lookbackDays: Math.max(1, safeInt(lookbackDays, 14)),
+        metrics,
+        dominantTraits: buildDominantTraits(metrics),
+        active,
+        skillState,
+        personalities,
+    };
+}
+
+async function getPetPersonalitySnapshot(coupleRoomId, userId, client, context = {}) {
+    const qFn = client ? client.query.bind(client) : query;
+    const lookbackDays = Math.max(1, safeInt(PERSONALITY_LOOKBACK_DAYS, 14));
+    const lookbackOffsetDays = Math.max(0, lookbackDays - 1);
+
+    const pet = context.pet || await ensurePet(coupleRoomId, client);
+    const partnerId = context.partnerId !== undefined
+        ? context.partnerId
+        : await getPartnerId(coupleRoomId, userId, client);
+
+    const metrics = buildDefaultPersonalityMetrics(pet);
+    const roomSeed = pet?.personality_signature_seed || String(coupleRoomId || 'room');
+
+    let summaryRows = [];
+    let dailyRows = [];
+
+    try {
+        const summaryRes = await qFn(
+            `SELECT
+                COALESCE(SUM(CASE WHEN action_type IN ('feed', 'pet', 'bathe', 'play') THEN 1 ELSE 0 END), 0)::int AS total_care,
+                COALESCE(SUM(CASE WHEN action_type = 'feed' THEN 1 ELSE 0 END), 0)::int AS feed_count,
+                COALESCE(SUM(CASE WHEN action_type = 'pet' THEN 1 ELSE 0 END), 0)::int AS pet_count,
+                COALESCE(SUM(CASE WHEN action_type = 'bathe' THEN 1 ELSE 0 END), 0)::int AS bathe_count,
+                COALESCE(SUM(CASE WHEN action_type = 'play' THEN 1 ELSE 0 END), 0)::int AS play_count,
+                COALESCE(SUM(CASE WHEN action_type = 'shop_purchase' THEN 1 ELSE 0 END), 0)::int AS shop_count
+             FROM pet_care_actions
+             WHERE couple_room_id = $1
+               AND (created_at AT TIME ZONE 'UTC')::date >= (CURRENT_DATE - ($2::int * INTERVAL '1 day'))`,
+            [coupleRoomId, lookbackOffsetDays]
+        );
+
+        const dailyRes = await qFn(
+            `SELECT
+                (created_at AT TIME ZONE 'UTC')::date AS day,
+                user_id,
+                COUNT(*)::int AS cnt
+             FROM pet_care_actions
+             WHERE couple_room_id = $1
+               AND action_type IN ('feed', 'pet', 'bathe', 'play')
+               AND (created_at AT TIME ZONE 'UTC')::date >= (CURRENT_DATE - ($2::int * INTERVAL '1 day'))
+             GROUP BY (created_at AT TIME ZONE 'UTC')::date, user_id`,
+            [coupleRoomId, lookbackOffsetDays]
+        );
+
+        summaryRows = summaryRes.rows || [];
+        dailyRows = dailyRes.rows || [];
+    } catch (err) {
+        if (err.code !== '42P01') throw err;
+    }
+
+    const summary = summaryRows[0] || {};
+    const totalCare = safeInt(summary.total_care, 0);
+    const feedCount = safeInt(summary.feed_count, 0);
+    const petCount = safeInt(summary.pet_count, 0);
+    const batheCount = safeInt(summary.bathe_count, 0);
+    const playCount = safeInt(summary.play_count, 0);
+    const shopCount = safeInt(summary.shop_count, 0);
+
+    const dayMap = new Map();
+    for (const row of dailyRows) {
+        const dayKey = row.day instanceof Date
+            ? toUTCDateKey(row.day)
+            : String(row.day).slice(0, 10);
+        const current = dayMap.get(dayKey) || { my: 0, partner: 0, total: 0 };
+        const cnt = safeInt(row.cnt, 0);
+
+        current.total += cnt;
+
+        if (String(row.user_id) === String(userId)) {
+            current.my += cnt;
+        } else if (partnerId && String(row.user_id) === String(partnerId)) {
+            current.partner += cnt;
+        } else if (!partnerId) {
+            current.my += cnt;
+        }
+
+        dayMap.set(dayKey, current);
+    }
+
+    if (context.myActionsToday !== undefined || context.partnerActionsToday !== undefined) {
+        const todayKey = toUTCDateKey();
+        const current = dayMap.get(todayKey) || { my: 0, partner: 0, total: 0 };
+        if (context.myActionsToday !== undefined) {
+            current.my = safeInt(context.myActionsToday, current.my);
+        }
+        if (context.partnerActionsToday !== undefined) {
+            current.partner = safeInt(context.partnerActionsToday, current.partner);
+        }
+        current.total = current.my + current.partner;
+        dayMap.set(todayKey, current);
+    }
+
+    let activeDays = 0;
+    let cooperativeDays = 0;
+    let balanceSum = 0;
+
+    for (const day of dayMap.values()) {
+        if (day.total <= 0) continue;
+
+        activeDays += 1;
+        if (day.my > 0 && day.partner > 0) {
+            cooperativeDays += 1;
+        }
+
+        const dayBalance = (1 - (Math.abs(day.my - day.partner) / Math.max(day.total, 1))) * 100;
+        balanceSum += Math.max(0, dayBalance);
+    }
+
+    const avgActionsPerActiveDay = activeDays > 0 ? totalCare / activeDays : 0;
+
+    let expeditionCount = 0;
+    try {
+        const expeditionRes = await qFn(
+            `SELECT COUNT(*)::int AS cnt
+             FROM pet_expeditions
+             WHERE couple_room_id = $1
+               AND status = 'collected'
+               AND collected_at IS NOT NULL
+               AND (collected_at AT TIME ZONE 'UTC')::date >= (CURRENT_DATE - ($2::int * INTERVAL '1 day'))`,
+            [coupleRoomId, lookbackOffsetDays]
+        );
+        expeditionCount = safeInt(expeditionRes.rows[0]?.cnt, 0);
+    } catch (err) {
+        if (err.code !== '42P01') throw err;
+    }
+
+    metrics.consistency = clampPercent((activeDays / lookbackDays) * 100);
+    metrics.teamwork = clampPercent(activeDays > 0 ? (cooperativeDays / activeDays) * 100 : 0);
+    metrics.nurturing = clampPercent(totalCare > 0 ? (feedCount / totalCare) * 100 : 0);
+    metrics.playful = clampPercent(totalCare > 0 ? (playCount / totalCare) * 100 : 0);
+    metrics.hygiene = clampPercent(totalCare > 0 ? (batheCount / totalCare) * 100 : 0);
+    metrics.affection = clampPercent(totalCare > 0 ? (petCount / totalCare) * 100 : 0);
+    metrics.explorer = clampPercent(Math.min(100, expeditionCount * 18));
+    metrics.shopper = clampPercent(Math.min(100, shopCount * 12));
+    metrics.balance = clampPercent(activeDays > 0 ? (balanceSum / activeDays) : 0);
+    metrics.devotion = clampPercent((totalCare / (lookbackDays * 6)) * 100);
+    metrics.discipline = clampPercent(100 - (Math.abs(avgActionsPerActiveDay - 3) * 22));
+
+    return buildPersonalitySnapshotFromMetrics({
+        pet,
+        metrics,
+        roomSeed,
+        lookbackDays,
+    });
+}
+
+function evaluatePersonalitySkill({ pet, action, personalitySnapshot }) {
+    const noTrigger = {
+        triggered: false,
+        skillId: null,
+        skillName: null,
+        cooldownMinutes: 0,
+        bonusStats: {},
+        bonusXp: 0,
+        bonusCoins: 0,
+        message: null,
+    };
+
+    const active = personalitySnapshot?.active;
+    const skill = active?.skill;
+
+    if (!skill || !Array.isArray(skill.triggerActions)) {
+        return noTrigger;
+    }
+
+    if (!skill.triggerActions.includes(action)) {
+        return noTrigger;
+    }
+
+    const skillState = personalitySnapshot.skillState || buildSkillState(pet, skill);
+    if (!skillState.isReady) {
+        return noTrigger;
+    }
+
+    return {
+        triggered: true,
+        skillId: skill.id,
+        skillName: skill.name,
+        cooldownMinutes: safeInt(skill.cooldownMinutes, 120),
+        bonusStats: skill.bonusStats || {},
+        bonusXp: safeInt(skill.bonusXp, 0),
+        bonusCoins: safeInt(skill.bonusCoins, 0),
+        message: `${active?.emoji || '✨'} ${active?.name || 'Tính cách'} kích hoạt ${skill.name}!`,
+    };
 }
 
 function computeBalancedStreakFromRows(rows, maxDays = 30) {
@@ -179,7 +720,15 @@ function buildCooldowns(pet) {
 /**
  * Format pet row into the response shape expected by Flutter.
  */
-function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins = 0, inventory = []) {
+function formatPetResponse(
+    pet,
+    myActionsToday,
+    partnerActionsToday,
+    loveCoins = 0,
+    inventory = [],
+    expedition = null,
+    personality = null
+) {
     const cooldowns = buildCooldowns(pet);
 
     // Calculate Yin-Yang imbalance
@@ -203,6 +752,8 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
         imbalancePenalty,
         loveCoins,
         inventory,
+        expedition,
+        personality,
         cooldowns,
         partnerContribution: {
             myActions: myActionsToday,
@@ -438,6 +989,23 @@ async function getPetState(req, res, next) {
 
         // Check daily reward
         const dailyReward = await checkDailyReward(roomId, userId);
+        const dailyQuest = await getDailyQuestSnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
+        let personality = null;
+        try {
+            personality = await getPetPersonalitySnapshot(roomId, userId, null, {
+                pet,
+                partnerId,
+                myActionsToday,
+                partnerActionsToday,
+            });
+        } catch (personalityErr) {
+            logger.warn(`[Pet] Personality snapshot fallback in getPetState (room ${roomId}): ${personalityErr.message}`);
+        }
 
         // Fetch currency and inventory
         const roomData = await query('SELECT love_coins FROM couple_rooms WHERE id = $1', [roomId]);
@@ -447,7 +1015,15 @@ async function getPetState(req, res, next) {
         const inventory = invData.rows.map(r => ({ id: r.item_id, qty: r.quantity }));
         const expedition = await getCurrentExpedition(roomId);
 
-        const responseData = formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins, inventory);
+        const responseData = formatPetResponse(
+            pet,
+            myActionsToday,
+            partnerActionsToday,
+            loveCoins,
+            inventory,
+            expedition,
+            personality
+        );
 
         return res.json({
             data: responseData,
@@ -619,12 +1195,17 @@ async function performAction(req, res, next) {
 
             const partnerId = await getPartnerId(roomId, userId, client);
             const partnerTodayBefore = partnerId ? await countTodayActions(roomId, partnerId, client) : 0;
-            const personalityBefore = await getPetPersonalitySnapshot(roomId, userId, client, {
-                pet,
-                partnerId,
-                myActionsToday: myToday,
-                partnerActionsToday: partnerTodayBefore,
-            });
+            let personalityBefore = null;
+            try {
+                personalityBefore = await getPetPersonalitySnapshot(roomId, userId, client, {
+                    pet,
+                    partnerId,
+                    myActionsToday: myToday,
+                    partnerActionsToday: partnerTodayBefore,
+                });
+            } catch (personalityErr) {
+                logger.warn(`[Pet] Personality snapshot fallback in performAction tx (room ${roomId}): ${personalityErr.message}`);
+            }
             const skillOutcome = evaluatePersonalitySkill({
                 pet,
                 action,
@@ -896,12 +1477,17 @@ async function performAction(req, res, next) {
         const invData = await query('SELECT item_id, quantity FROM pet_inventory WHERE couple_room_id = $1', [roomId]);
         const inventory = invData.rows.map(r => ({ id: r.item_id, qty: r.quantity }));
 
-        const personality = await getPetPersonalitySnapshot(roomId, userId, null, {
-            pet,
-            partnerId,
-            myActionsToday,
-            partnerActionsToday,
-        });
+        let personality = null;
+        try {
+            personality = await getPetPersonalitySnapshot(roomId, userId, null, {
+                pet,
+                partnerId,
+                myActionsToday,
+                partnerActionsToday,
+            });
+        } catch (personalityErr) {
+            logger.warn(`[Pet] Personality snapshot fallback in performAction response (room ${roomId}): ${personalityErr.message}`);
+        }
 
         const responseData = formatPetResponse(
             pet,
@@ -1106,12 +1692,17 @@ async function evolvePet(req, res, next) {
         const partnerId = await getPartnerId(roomId, userId);
         const myActionsToday = await countTodayActions(roomId, userId);
         const partnerActionsToday = partnerId ? await countTodayActions(roomId, partnerId) : 0;
-        const personality = await getPetPersonalitySnapshot(roomId, userId, null, {
-            pet: result.pet,
-            partnerId,
-            myActionsToday,
-            partnerActionsToday,
-        });
+        let personality = null;
+        try {
+            personality = await getPetPersonalitySnapshot(roomId, userId, null, {
+                pet: result.pet,
+                partnerId,
+                myActionsToday,
+                partnerActionsToday,
+            });
+        } catch (personalityErr) {
+            logger.warn(`[Pet] Personality snapshot fallback in evolvePet (room ${roomId}): ${personalityErr.message}`);
+        }
 
         const responseData = formatPetResponse(
             result.pet,
@@ -1712,6 +2303,153 @@ async function collectExpeditionLoot(req, res, next) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  Daily Quests
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/couple/pet/daily-quests — Daily quest snapshot + claim state
+ */
+async function getDailyQuests(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const snapshot = await getDailyQuestSnapshot(roomId, userId);
+        return res.json({ data: snapshot });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * POST /api/couple/pet/daily-quests/claim — Claim daily quest reward
+ */
+async function claimDailyQuestReward(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const result = await transaction(async (client) => {
+            const snapshot = await getDailyQuestSnapshot(roomId, userId, client);
+
+            if (snapshot.claimed) {
+                const err = new Error('Bạn đã nhận thưởng nhiệm vụ hôm nay rồi. Mai quay lại nhé!');
+                err.statusCode = 409;
+                throw err;
+            }
+
+            if (!snapshot.canClaim) {
+                const err = new Error('Chưa hoàn thành đủ nhiệm vụ ngày để nhận thưởng.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            const claimRes = await client.query(
+                `INSERT INTO coin_reward_logs (couple_room_id, reward_type, reward_key, coins_awarded, awarded_by, metadata)
+                 VALUES ($1, 'pet_daily_quest', $2, $3, $4, $5::jsonb)
+                 ON CONFLICT (couple_room_id, reward_type, reward_key) DO NOTHING
+                 RETURNING id`,
+                [
+                    roomId,
+                    snapshot.rewardKey,
+                    snapshot.rewardCoins,
+                    userId,
+                    JSON.stringify({
+                        source: 'pet_daily_quest',
+                        completedCount: snapshot.completedCount,
+                        totalCount: snapshot.totalCount,
+                    }),
+                ]
+            );
+
+            if (!claimRes.rows.length) {
+                const err = new Error('Phần thưởng hôm nay đã được nhận trước đó rồi.');
+                err.statusCode = 409;
+                throw err;
+            }
+
+            await client.query(
+                `UPDATE couple_rooms
+                 SET love_coins = love_coins + $2
+                 WHERE id = $1`,
+                [roomId, snapshot.rewardCoins]
+            );
+
+            const coinsRes = await client.query(
+                'SELECT love_coins FROM couple_rooms WHERE id = $1',
+                [roomId]
+            );
+
+            const updatedSnapshot = {
+                ...snapshot,
+                claimed: true,
+                canClaim: false,
+            };
+
+            return {
+                coinsAwarded: snapshot.rewardCoins,
+                rewardKey: snapshot.rewardKey,
+                loveCoins: coinsRes.rows[0]?.love_coins || 0,
+                dailyQuest: updatedSnapshot,
+            };
+        });
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('pet:daily_quest_claimed', {
+                byUserId: userId,
+                byDisplayName: req.dbUser.display_name,
+                coinsAwarded: result.coinsAwarded,
+                loveCoins: result.loveCoins,
+                rewardKey: result.rewardKey,
+                dailyQuest: result.dailyQuest,
+                claimedAt: new Date().toISOString(),
+            });
+        }
+
+        return res.json({
+            data: {
+                coinsAwarded: result.coinsAwarded,
+                rewardKey: result.rewardKey,
+                loveCoins: result.loveCoins,
+                dailyQuest: result.dailyQuest,
+            },
+            message: `Nhận thưởng nhiệm vụ ngày thành công +${result.coinsAwarded} Love Coins! 🎯`,
+        });
+    } catch (err) {
+        if (err.statusCode) {
+            return res.status(err.statusCode).json({ error: err.message });
+        }
+        next(err);
+    }
+}
+
+/**
+ * GET /api/couple/pet/personality — Full personality + skill snapshot
+ */
+async function getPetPersonality(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+        const partnerId = await getPartnerId(roomId, userId);
+        const pet = await ensurePet(roomId);
+        const myActionsToday = await countTodayActions(roomId, userId);
+        const partnerActionsToday = partnerId ? await countTodayActions(roomId, partnerId) : 0;
+
+        const snapshot = await getPetPersonalitySnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
+
+        return res.json({ data: snapshot });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  Achievement System
 // ═══════════════════════════════════════════════════════════════
 
@@ -1986,6 +2724,13 @@ module.exports = {
     startExpedition,
     getExpeditionStatus,
     collectExpeditionLoot,
+    // Daily quests
+    getDailyQuests,
+    claimDailyQuestReward,
+    getDailyQuestSnapshot,
+    // Personality
+    getPetPersonality,
+    getPetPersonalitySnapshot,
     // Achievements
     getAchievements,
     checkAndUpdateAchievements,
@@ -2004,5 +2749,7 @@ module.exports = {
     DECAY_INTERVAL_HOURS,
     DECAY_PER_INTERVAL,
     EXPEDITION_TYPES,
+    PET_DAILY_QUEST_DEFINITIONS,
+    PET_PERSONALITY_DEFINITIONS,
     ACHIEVEMENT_DEFINITIONS,
 };
