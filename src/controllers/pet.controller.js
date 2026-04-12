@@ -22,14 +22,54 @@ const PREMIUM_FEED_CONFIG = {
 };
 
 // Love Coin rewards for pet care actions
-const PET_CARE_COIN_REWARD = 2;        // coins per care action
-const PET_FIRST_CARE_COIN_BONUS = 3;   // bonus for first action of the day
-const PET_COOP_COIN_BONUS = 5;         // bonus when both partners contribute same day
+const PET_CARE_COIN_REWARD = 3;        // coins per care action
+const PET_FIRST_CARE_COIN_BONUS = 4;   // bonus for first action of the day
+const PET_COOP_COIN_BONUS = 6;         // bonus when both partners contribute same day
+
+const SHOP_PRICES = {
+    basic_food: 4,
+    basic_soap: 6,
+    basic_toy: 6,
+    premium_food: 12,
+    evolution_stone: 220,
+};
 
 const FEED_ITEM_IDS = ['basic_food', 'premium_food'];
 
 const VALID_ACTIONS = Object.keys(ACTION_CONFIG);
 const COOPERATIVE_BONUS_XP = 25;
+
+const PET_DAILY_QUEST_REWARD_COINS = 36;
+const PET_DAILY_QUEST_DEFINITIONS = [
+    {
+        id: 'self_care_3',
+        icon: '🍖',
+        title: 'Tự chăm pet 3 lần',
+        description: 'Bạn thực hiện tối thiểu 3 hành động chăm pet trong ngày',
+        target: 3,
+    },
+    {
+        id: 'both_contribute',
+        icon: '💞',
+        title: 'Cả hai cùng chăm pet',
+        description: 'Mỗi người ít nhất 1 hành động chăm pet trong ngày',
+        target: 1,
+    },
+    {
+        id: 'avg_stat_75',
+        icon: '✨',
+        title: 'Giữ chỉ số trung bình ≥ 75',
+        description: 'Giữ trung bình 4 chỉ số của pet đạt từ 75 điểm',
+        target: 75,
+    },
+    {
+        id: 'expedition_collected_1',
+        icon: '🗺️',
+        title: 'Hoàn thành 1 viễn chinh',
+        description: 'Thu thập thưởng từ ít nhất 1 chuyến viễn chinh trong ngày',
+        target: 1,
+    },
+];
 
 // Decay: −3 per stat for every 4 hours of inactivity
 const DECAY_INTERVAL_HOURS = 4;
@@ -61,6 +101,125 @@ function computeXpToNextLevel(totalXp) {
 
 function toUTCDateKey(date = new Date()) {
     return date.toISOString().slice(0, 10);
+}
+
+function getDailyQuestRewardKey(date = new Date()) {
+    return `pet_daily_quest_${toUTCDateKey(date)}`;
+}
+
+function buildDailyQuestItems({ myActionsToday, partnerActionsToday, averageStat, expeditionsCollectedToday }) {
+    const bothContributed = myActionsToday > 0 && partnerActionsToday > 0;
+
+    return PET_DAILY_QUEST_DEFINITIONS.map((def) => {
+        let progress = 0;
+
+        switch (def.id) {
+            case 'self_care_3':
+                progress = myActionsToday;
+                break;
+            case 'both_contribute':
+                progress = bothContributed ? 1 : 0;
+                break;
+            case 'avg_stat_75':
+                progress = averageStat;
+                break;
+            case 'expedition_collected_1':
+                progress = expeditionsCollectedToday;
+                break;
+            default:
+                progress = 0;
+                break;
+        }
+
+        const normalizedProgress = Math.max(0, Math.min(progress, def.target));
+
+        return {
+            id: def.id,
+            icon: def.icon,
+            title: def.title,
+            description: def.description,
+            progress: normalizedProgress,
+            target: def.target,
+            isCompleted: normalizedProgress >= def.target,
+        };
+    });
+}
+
+async function getDailyQuestSnapshot(coupleRoomId, userId, client, context = {}) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    const pet = context.pet || await ensurePet(coupleRoomId, client);
+    const partnerId = context.partnerId !== undefined
+        ? context.partnerId
+        : await getPartnerId(coupleRoomId, userId, client);
+
+    const myActionsToday = context.myActionsToday !== undefined
+        ? context.myActionsToday
+        : await countTodayActions(coupleRoomId, userId, client);
+
+    const partnerActionsToday = context.partnerActionsToday !== undefined
+        ? context.partnerActionsToday
+        : (partnerId ? await countTodayActions(coupleRoomId, partnerId, client) : 0);
+
+    let expeditionsCollectedToday = 0;
+    try {
+        const expeditionRes = await qFn(
+            `SELECT COUNT(*)::int AS cnt
+             FROM pet_expeditions
+             WHERE couple_room_id = $1
+               AND status = 'collected'
+               AND collected_at IS NOT NULL
+               AND (collected_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+            [coupleRoomId]
+        );
+        expeditionsCollectedToday = expeditionRes.rows[0]?.cnt || 0;
+    } catch (err) {
+        // Backward compatibility when expedition table is unavailable.
+        if (err.code !== '42P01') throw err;
+    }
+
+    const averageStat = Math.round(
+        ((pet.health || 0) + (pet.mood || 0) + (pet.hunger || 0) + (pet.cleanliness || 0)) / 4
+    );
+
+    const quests = buildDailyQuestItems({
+        myActionsToday,
+        partnerActionsToday,
+        averageStat,
+        expeditionsCollectedToday,
+    });
+
+    const completedCount = quests.filter((quest) => quest.isCompleted).length;
+    const rewardKey = getDailyQuestRewardKey();
+
+    let claimed = false;
+    try {
+        const claimRes = await qFn(
+            `SELECT 1
+             FROM coin_reward_logs
+             WHERE couple_room_id = $1
+               AND reward_type = 'pet_daily_quest'
+               AND reward_key = $2
+             LIMIT 1`,
+            [coupleRoomId, rewardKey]
+        );
+        claimed = claimRes.rows.length > 0;
+    } catch (err) {
+        // Backward compatibility when reward ledger has not been migrated yet.
+        if (err.code !== '42P01') throw err;
+        claimed = false;
+    }
+
+    return {
+        dateKey: toUTCDateKey(),
+        rewardKey,
+        rewardCoins: PET_DAILY_QUEST_REWARD_COINS,
+        claimed,
+        completedCount,
+        totalCount: quests.length,
+        canClaim: !claimed && completedCount === quests.length,
+        quests,
+    };
 }
 
 function computeBalancedStreakFromRows(rows, maxDays = 30) {
@@ -167,7 +326,7 @@ function buildCooldowns(pet) {
 /**
  * Format pet row into the response shape expected by Flutter.
  */
-function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins = 0, inventory = []) {
+function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins = 0, inventory = [], expedition = null) {
     const cooldowns = buildCooldowns(pet);
 
     // Calculate Yin-Yang imbalance
@@ -191,6 +350,7 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
         imbalancePenalty,
         loveCoins,
         inventory,
+        expedition,
         cooldowns,
         partnerContribution: {
             myActions: myActionsToday,
@@ -203,6 +363,56 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
             lastPettedAt: pet.last_petted_at ? new Date(pet.last_petted_at).toISOString() : null,
         },
     };
+}
+
+/**
+ * Get current expedition snapshot for UI state.
+ * Returns either the active exploring expedition or a returned one waiting for collection.
+ */
+async function getCurrentExpedition(coupleRoomId, client) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    try {
+        await qFn(
+            `UPDATE pet_expeditions
+             SET status = 'returned'
+             WHERE couple_room_id = $1 AND status = 'exploring' AND ends_at <= NOW()`,
+            [coupleRoomId]
+        );
+
+        const result = await qFn(
+            `SELECT id, status, expedition_type, duration_hours, started_at, ends_at, loot_data
+             FROM pet_expeditions
+             WHERE couple_room_id = $1 AND status IN ('exploring', 'returned')
+             ORDER BY created_at DESC LIMIT 1`,
+            [coupleRoomId]
+        );
+
+        if (!result.rows.length) {
+            return null;
+        }
+
+        const exp = result.rows[0];
+        const typeConfig = EXPEDITION_TYPES[exp.expedition_type] || EXPEDITION_TYPES.forest;
+
+        return {
+            id: exp.id,
+            status: exp.status,
+            type: exp.expedition_type,
+            typeLabel: typeConfig.label,
+            typeEmoji: typeConfig.emoji,
+            duration: exp.duration_hours,
+            startedAt: exp.started_at,
+            endsAt: exp.ends_at,
+            loot: exp.status === 'returned' ? exp.loot_data : null,
+        };
+    } catch (err) {
+        // Backward compatibility when migration 016 has not been applied yet.
+        if (err.code === '42P01') {
+            return null;
+        }
+        throw err;
+    }
 }
 
 /**
@@ -376,6 +586,12 @@ async function getPetState(req, res, next) {
 
         // Check daily reward
         const dailyReward = await checkDailyReward(roomId, userId);
+        const dailyQuest = await getDailyQuestSnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
 
         // Fetch currency and inventory
         const roomData = await query('SELECT love_coins FROM couple_rooms WHERE id = $1', [roomId]);
@@ -383,13 +599,22 @@ async function getPetState(req, res, next) {
 
         const invData = await query('SELECT item_id, quantity FROM pet_inventory WHERE couple_room_id = $1', [roomId]);
         const inventory = invData.rows.map(r => ({ id: r.item_id, qty: r.quantity }));
+        const expedition = await getCurrentExpedition(roomId);
 
-        const responseData = formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins, inventory);
+        const responseData = formatPetResponse(
+            pet,
+            myActionsToday,
+            partnerActionsToday,
+            loveCoins,
+            inventory,
+            expedition
+        );
 
         return res.json({
             data: responseData,
             meta: {
                 dailyReward,
+                dailyQuest,
             }
         });
     } catch (err) {
@@ -468,6 +693,14 @@ async function performAction(req, res, next) {
                     [roomId, decay.health, decay.mood, decay.hunger, decay.cleanliness]
                 );
                 pet = decayed.rows[0] || pet;
+            }
+
+            // Prevent care actions while the pet is actively exploring.
+            const expedition = await getCurrentExpedition(roomId, client);
+            if (expedition?.status === 'exploring') {
+                const err = new Error('Pet đang đi viễn chinh, hãy chờ pet trở về nhé!');
+                err.statusCode = 400;
+                throw err;
             }
 
             // 3. Check cooldown
@@ -1111,14 +1344,6 @@ async function buyShopItem(req, res, next) {
         const { itemId, quantity } = req.body;
         const qty = parseInt(quantity) || 1;
 
-        const SHOP_PRICES = {
-            basic_food: 10,
-            basic_soap: 15,
-            basic_toy: 15,
-            premium_food: 30,
-            evolution_stone: 500, // Very expensive
-        };
-
         const pricePerUnit = SHOP_PRICES[itemId];
         if (!pricePerUnit) {
             return res.status(400).json({ error: 'Mặt hàng không tồn tại trong Cửa Hàng' });
@@ -1196,10 +1421,10 @@ async function buyShopItem(req, res, next) {
 // ═══════════════════════════════════════════════════════════════
 
 const EXPEDITION_TYPES = {
-    forest:   { label: 'Rừng Thần Tiên',   emoji: '🌲', minLevel: 1 },
-    beach:    { label: 'Bãi Biển Tình Yêu', emoji: '🏖️', minLevel: 2 },
-    mountain: { label: 'Đỉnh Núi Mây',     emoji: '⛰️', minLevel: 4 },
-    cave:     { label: 'Hang Đá Bí Ẩn',    emoji: '🕳️', minLevel: 6 },
+    forest: { label: 'Rừng Thần Tiên', emoji: '🌲', minLevel: 1 },
+    beach: { label: 'Bãi Biển Tình Yêu', emoji: '🏖️', minLevel: 2 },
+    mountain: { label: 'Đỉnh Núi Mây', emoji: '⛰️', minLevel: 4 },
+    cave: { label: 'Hang Đá Bí Ẩn', emoji: '🕳️', minLevel: 6 },
 };
 
 const EXPEDITION_DURATIONS = [4, 6, 8]; // hours
@@ -1207,24 +1432,24 @@ const EXPEDITION_DURATIONS = [4, 6, 8]; // hours
 // Loot tables per expedition type + duration tier
 const EXPEDITION_LOOT_TABLE = {
     forest: {
-        common:   [{ type: 'coins', amount: 8 }, { type: 'coins', amount: 12 }, { type: 'item', itemId: 'basic_food', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 20 }, { type: 'item', itemId: 'basic_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
-        rare:     [{ type: 'coins', amount: 35 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
+        common: [{ type: 'coins', amount: 12 }, { type: 'coins', amount: 16 }, { type: 'item', itemId: 'basic_food', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 26 }, { type: 'item', itemId: 'basic_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
+        rare: [{ type: 'coins', amount: 42 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
     },
     beach: {
-        common:   [{ type: 'coins', amount: 12 }, { type: 'item', itemId: 'basic_soap', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 25 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_food', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 50 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
+        common: [{ type: 'coins', amount: 16 }, { type: 'item', itemId: 'basic_soap', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 32 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_food', qty: 2 }],
+        rare: [{ type: 'coins', amount: 60 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
     },
     mountain: {
-        common:   [{ type: 'coins', amount: 18 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 35 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 70 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }],
+        common: [{ type: 'coins', amount: 24 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 44 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
+        rare: [{ type: 'coins', amount: 85 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }],
     },
     cave: {
-        common:   [{ type: 'coins', amount: 25 }, { type: 'item', itemId: 'premium_food', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 50 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 100 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }, { type: 'item', itemId: 'premium_food', qty: 3 }],
+        common: [{ type: 'coins', amount: 34 }, { type: 'item', itemId: 'premium_food', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 64 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
+        rare: [{ type: 'coins', amount: 120 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }, { type: 'item', itemId: 'premium_food', qty: 3 }],
     },
 };
 
@@ -1266,54 +1491,96 @@ async function startExpedition(req, res, next) {
 
         const expType = EXPEDITION_TYPES[type] ? type : 'forest';
         const expDuration = EXPEDITION_DURATIONS.includes(parseInt(duration)) ? parseInt(duration) : 4;
-
-        // Check if already on expedition
-        const active = await query(
-            `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'exploring'`,
-            [roomId]
-        );
-        if (active.rows.length > 0) {
-            return res.status(400).json({ error: 'Pet đang đi viễn chinh rồi! Đợi pet về nhé.' });
-        }
-
-        // Check for uncollected expedition
-        const uncollected = await query(
-            `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'returned'`,
-            [roomId]
-        );
-        if (uncollected.rows.length > 0) {
-            return res.status(400).json({ error: 'Pet đã về nhưng chưa nhận thưởng! Hãy thu thập loot trước.' });
-        }
-
-        // Check pet health requirements
-        const pet = await ensurePet(roomId);
-        if (pet.health < 30) {
-            return res.status(400).json({ error: 'Pet quá yếu để đi viễn chinh. Cần sức khỏe ≥ 30.' });
-        }
-        if (pet.hunger < 20) {
-            return res.status(400).json({ error: 'Pet quá đói để đi viễn chinh. Cần no bụng ≥ 20.' });
-        }
-
-        // Check level requirement for expedition type
         const typeConfig = EXPEDITION_TYPES[expType];
-        if (pet.evolution_level < typeConfig.minLevel) {
-            return res.status(400).json({
-                error: `${typeConfig.label} yêu cầu pet Lv.${typeConfig.minLevel}+. Pet hiện tại Lv.${pet.evolution_level}.`
-            });
-        }
 
-        // Roll loot ahead of time (stored encrypted, revealed on collect)
-        const loot = rollLoot(expType, expDuration, pet.evolution_level);
-        const endsAt = new Date(Date.now() + expDuration * 60 * 60 * 1000);
+        const result = await transaction(async (client) => {
+            // Serialize expedition start per room to avoid duplicate exploring rows.
+            await client.query('SELECT id FROM couple_rooms WHERE id = $1 FOR UPDATE', [roomId]);
 
-        const result = await query(
-            `INSERT INTO pet_expeditions (couple_room_id, expedition_type, duration_hours, loot_data, ends_at, started_by)
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-             RETURNING *`,
-            [roomId, expType, expDuration, JSON.stringify(loot), endsAt.toISOString(), userId]
-        );
+            // Promote expired expeditions to returned before checks.
+            await client.query(
+                `UPDATE pet_expeditions
+                 SET status = 'returned'
+                 WHERE couple_room_id = $1 AND status = 'exploring' AND ends_at <= NOW()`,
+                [roomId]
+            );
 
-        const expedition = result.rows[0];
+            // Check if already on expedition
+            const active = await client.query(
+                `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'exploring'`,
+                [roomId]
+            );
+            if (active.rows.length > 0) {
+                const err = new Error('Pet đang đi viễn chinh rồi! Đợi pet về nhé.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Check for uncollected expedition
+            const uncollected = await client.query(
+                `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'returned'`,
+                [roomId]
+            );
+            if (uncollected.rows.length > 0) {
+                const err = new Error('Pet đã về nhưng chưa nhận thưởng! Hãy thu thập loot trước.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Check pet health requirements after syncing pending decay.
+            let pet = await ensurePet(roomId, client);
+            const decay = computeDecay(pet);
+            if (decay.decayApplied) {
+                const decayed = await client.query(
+                    `UPDATE couple_pet
+                     SET health = $2, mood = $3, hunger = $4, cleanliness = $5,
+                         last_decay_at = NOW()
+                     WHERE couple_room_id = $1
+                     RETURNING *`,
+                    [roomId, decay.health, decay.mood, decay.hunger, decay.cleanliness]
+                );
+                pet = decayed.rows[0] || pet;
+            }
+
+            if (pet.health < 30) {
+                const err = new Error('Pet quá yếu để đi viễn chinh. Cần sức khỏe ≥ 30.');
+                err.statusCode = 400;
+                throw err;
+            }
+            if (pet.hunger < 20) {
+                const err = new Error('Pet quá đói để đi viễn chinh. Cần no bụng ≥ 20.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Check level requirement for expedition type
+            if (pet.evolution_level < typeConfig.minLevel) {
+                const err = new Error(
+                    `${typeConfig.label} yêu cầu pet Lv.${typeConfig.minLevel}+. Pet hiện tại Lv.${pet.evolution_level}.`
+                );
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Roll loot ahead of time (stored encrypted, revealed on collect)
+            const loot = rollLoot(expType, expDuration, pet.evolution_level);
+            const endsAt = new Date(Date.now() + expDuration * 60 * 60 * 1000);
+
+            const created = await client.query(
+                `INSERT INTO pet_expeditions (couple_room_id, expedition_type, duration_hours, loot_data, ends_at, started_by)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+                 RETURNING *`,
+                [roomId, expType, expDuration, JSON.stringify(loot), endsAt.toISOString(), userId]
+            );
+
+            return {
+                expedition: created.rows[0],
+                petName: pet.pet_name,
+                endsAt: endsAt.toISOString(),
+            };
+        });
+
+        const expedition = result.expedition;
 
         // Emit socket event
         const io = getIO();
@@ -1324,7 +1591,7 @@ async function startExpedition(req, res, next) {
                 typeLabel: typeConfig.label,
                 typeEmoji: typeConfig.emoji,
                 duration: expDuration,
-                endsAt: endsAt.toISOString(),
+                endsAt: result.endsAt,
                 startedBy: req.dbUser.display_name,
             });
         }
@@ -1340,11 +1607,14 @@ async function startExpedition(req, res, next) {
                 typeEmoji: typeConfig.emoji,
                 duration: expDuration,
                 startedAt: expedition.started_at,
-                endsAt: endsAt.toISOString(),
+                endsAt: result.endsAt,
             },
-            message: `${pet.pet_name} đã lên đường viễn chinh ${typeConfig.emoji} ${typeConfig.label}!`,
+            message: `${result.petName} đã lên đường viễn chinh ${typeConfig.emoji} ${typeConfig.label}!`,
         });
     } catch (err) {
+        if (err.statusCode) {
+            return res.status(err.statusCode).json({ error: err.message });
+        }
         next(err);
     }
 }
@@ -1519,22 +1789,144 @@ async function collectExpeditionLoot(req, res, next) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  Daily Quests
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/couple/pet/daily-quests — Daily quest snapshot + claim state
+ */
+async function getDailyQuests(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const snapshot = await getDailyQuestSnapshot(roomId, userId);
+        return res.json({ data: snapshot });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * POST /api/couple/pet/daily-quests/claim — Claim daily quest reward
+ */
+async function claimDailyQuestReward(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const result = await transaction(async (client) => {
+            const snapshot = await getDailyQuestSnapshot(roomId, userId, client);
+
+            if (snapshot.claimed) {
+                const err = new Error('Bạn đã nhận thưởng nhiệm vụ hôm nay rồi. Mai quay lại nhé!');
+                err.statusCode = 409;
+                throw err;
+            }
+
+            if (!snapshot.canClaim) {
+                const err = new Error('Chưa hoàn thành đủ nhiệm vụ ngày để nhận thưởng.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            const claimRes = await client.query(
+                `INSERT INTO coin_reward_logs (couple_room_id, reward_type, reward_key, coins_awarded, awarded_by, metadata)
+                 VALUES ($1, 'pet_daily_quest', $2, $3, $4, $5::jsonb)
+                 ON CONFLICT (couple_room_id, reward_type, reward_key) DO NOTHING
+                 RETURNING id`,
+                [
+                    roomId,
+                    snapshot.rewardKey,
+                    snapshot.rewardCoins,
+                    userId,
+                    JSON.stringify({
+                        source: 'pet_daily_quest',
+                        completedCount: snapshot.completedCount,
+                        totalCount: snapshot.totalCount,
+                    }),
+                ]
+            );
+
+            if (!claimRes.rows.length) {
+                const err = new Error('Phần thưởng hôm nay đã được nhận trước đó rồi.');
+                err.statusCode = 409;
+                throw err;
+            }
+
+            await client.query(
+                `UPDATE couple_rooms
+                 SET love_coins = love_coins + $2
+                 WHERE id = $1`,
+                [roomId, snapshot.rewardCoins]
+            );
+
+            const coinsRes = await client.query(
+                'SELECT love_coins FROM couple_rooms WHERE id = $1',
+                [roomId]
+            );
+
+            const updatedSnapshot = {
+                ...snapshot,
+                claimed: true,
+                canClaim: false,
+            };
+
+            return {
+                coinsAwarded: snapshot.rewardCoins,
+                rewardKey: snapshot.rewardKey,
+                loveCoins: coinsRes.rows[0]?.love_coins || 0,
+                dailyQuest: updatedSnapshot,
+            };
+        });
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('pet:daily_quest_claimed', {
+                byUserId: userId,
+                byDisplayName: req.dbUser.display_name,
+                coinsAwarded: result.coinsAwarded,
+                loveCoins: result.loveCoins,
+                rewardKey: result.rewardKey,
+                dailyQuest: result.dailyQuest,
+                claimedAt: new Date().toISOString(),
+            });
+        }
+
+        return res.json({
+            data: {
+                coinsAwarded: result.coinsAwarded,
+                rewardKey: result.rewardKey,
+                loveCoins: result.loveCoins,
+                dailyQuest: result.dailyQuest,
+            },
+            message: `Nhận thưởng nhiệm vụ ngày thành công +${result.coinsAwarded} Love Coins! 🎯`,
+        });
+    } catch (err) {
+        if (err.statusCode) {
+            return res.status(err.statusCode).json({ error: err.message });
+        }
+        next(err);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  Achievement System
 // ═══════════════════════════════════════════════════════════════
 
 const ACHIEVEMENT_DEFINITIONS = [
-    { id: 'first_care',       label: '🥚 Người Mới',             description: 'Chăm sóc pet lần đầu tiên',           target: 1,    coins: 10 },
-    { id: 'caretaker_50',     label: '🍼 Bảo Mẫu Siêng Năng',   description: 'Chăm sóc pet 50 lần',                  target: 50,   coins: 50 },
-    { id: 'caretaker_200',    label: '👨‍⚕️ Bác Sĩ Thú Y',         description: 'Chăm sóc pet 200 lần',                 target: 200,  coins: 150 },
-    { id: 'first_evolution',  label: '💎 Tiến Hóa Lần Đầu',     description: 'Tiến hóa pet lần đầu tiên',            target: 1,    coins: 30 },
-    { id: 'max_evolution',    label: '🌟 Hình Thái Cuối Cùng',   description: 'Pet đạt cấp tiến hóa tối đa (Lv.8)',   target: 8,    coins: 500 },
-    { id: 'explorer_10',     label: '🏔️ Nhà Thám Hiểm',         description: 'Hoàn thành 10 cuộc viễn chinh',        target: 10,   coins: 80 },
-    { id: 'explorer_50',     label: '🗺️ Phượt Thủ Chuyên Nghiệp', description: 'Hoàn thành 50 cuộc viễn chinh',      target: 50,   coins: 300 },
-    { id: 'rich_1000',       label: '💰 Đại Gia',                description: 'Sở hữu 1000 Love Coins cùng lúc',       target: 1000, coins: 100 },
-    { id: 'balance_7',       label: '⚖️ Cân Bằng Hoàn Hảo',     description: 'Giữ Yin-Yang balance 7 ngày liên tiếp', target: 7,    coins: 120 },
-    { id: 'pet_age_30',      label: '🎂 1 Tháng Bên Nhau',      description: 'Nuôi pet đạt 30 ngày tuổi',            target: 30,   coins: 60  },
-    { id: 'pet_age_100',     label: '💝 100 Ngày Yêu Thương',   description: 'Nuôi pet đạt 100 ngày tuổi',           target: 100,  coins: 200 },
-    { id: 'shopper_20',      label: '🛍️ Tín Đồ Mua Sắm',       description: 'Mua 20 vật phẩm từ cửa hàng',          target: 20,   coins: 40  },
+    { id: 'first_care', label: '🥚 Người Mới', description: 'Chăm sóc pet lần đầu tiên', target: 1, coins: 10 },
+    { id: 'caretaker_50', label: '🍼 Bảo Mẫu Siêng Năng', description: 'Chăm sóc pet 50 lần', target: 50, coins: 50 },
+    { id: 'caretaker_200', label: '👨‍⚕️ Bác Sĩ Thú Y', description: 'Chăm sóc pet 200 lần', target: 200, coins: 150 },
+    { id: 'first_evolution', label: '💎 Tiến Hóa Lần Đầu', description: 'Tiến hóa pet lần đầu tiên', target: 1, coins: 30 },
+    { id: 'max_evolution', label: '🌟 Hình Thái Cuối Cùng', description: 'Pet đạt cấp tiến hóa tối đa (Lv.8)', target: 8, coins: 500 },
+    { id: 'explorer_10', label: '🏔️ Nhà Thám Hiểm', description: 'Hoàn thành 10 cuộc viễn chinh', target: 10, coins: 80 },
+    { id: 'explorer_50', label: '🗺️ Phượt Thủ Chuyên Nghiệp', description: 'Hoàn thành 50 cuộc viễn chinh', target: 50, coins: 300 },
+    { id: 'rich_1000', label: '💰 Đại Gia', description: 'Sở hữu 1000 Love Coins cùng lúc', target: 1000, coins: 100 },
+    { id: 'balance_7', label: '⚖️ Cân Bằng Hoàn Hảo', description: 'Giữ Yin-Yang balance 7 ngày liên tiếp', target: 7, coins: 120 },
+    { id: 'pet_age_30', label: '🎂 1 Tháng Bên Nhau', description: 'Nuôi pet đạt 30 ngày tuổi', target: 30, coins: 60 },
+    { id: 'pet_age_100', label: '💝 100 Ngày Yêu Thương', description: 'Nuôi pet đạt 100 ngày tuổi', target: 100, coins: 200 },
+    { id: 'shopper_20', label: '🛍️ Tín Đồ Mua Sắm', description: 'Mua 20 vật phẩm từ cửa hàng', target: 20, coins: 40 },
 ];
 
 /**
@@ -1574,18 +1966,18 @@ async function checkAndUpdateAchievements(coupleRoomId) {
 
         // Calculate progress for each achievement
         const progressMap = {
-            first_care:      totalCareActions,
-            caretaker_50:    totalCareActions,
-            caretaker_200:   totalCareActions,
+            first_care: totalCareActions,
+            caretaker_50: totalCareActions,
+            caretaker_200: totalCareActions,
             first_evolution: Math.max(pet.evolution_level - 1, 0),
-            max_evolution:   pet.evolution_level,
-            explorer_10:     totalExpeditions,
-            explorer_50:     totalExpeditions,
-            rich_1000:       currentCoins,
-            balance_7:       balancedStreak,
-            pet_age_30:      petAge,
-            pet_age_100:     petAge,
-            shopper_20:      totalPurchases,
+            max_evolution: pet.evolution_level,
+            explorer_10: totalExpeditions,
+            explorer_50: totalExpeditions,
+            rich_1000: currentCoins,
+            balance_7: balancedStreak,
+            pet_age_30: petAge,
+            pet_age_100: petAge,
+            shopper_20: totalPurchases,
         };
 
         const newlyUnlocked = [];
@@ -1706,8 +2098,8 @@ async function getAchievements(req, res, next) {
 //  Daily Login Reward
 // ═══════════════════════════════════════════════════════════════
 
-const DAILY_REWARD_SCHEDULE = [5, 8, 12, 15, 18, 22, 30]; // Day 1-7 coin rewards
-const DAILY_REWARD_WEEKLY_BONUS = 30; // Bonus on day 7
+const DAILY_REWARD_SCHEDULE = [8, 10, 12, 15, 18, 22, 28]; // Day 1-7 coin rewards
+const DAILY_REWARD_WEEKLY_BONUS = 25; // Bonus on each 7-day milestone
 
 /**
  * Check and award daily login reward. Called from getPetState.
@@ -1793,6 +2185,10 @@ module.exports = {
     startExpedition,
     getExpeditionStatus,
     collectExpeditionLoot,
+    // Daily quests
+    getDailyQuests,
+    claimDailyQuestReward,
+    getDailyQuestSnapshot,
     // Achievements
     getAchievements,
     checkAndUpdateAchievements,
@@ -1811,5 +2207,6 @@ module.exports = {
     DECAY_INTERVAL_HOURS,
     DECAY_PER_INTERVAL,
     EXPEDITION_TYPES,
+    PET_DAILY_QUEST_DEFINITIONS,
     ACHIEVEMENT_DEFINITIONS,
 };

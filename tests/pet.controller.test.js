@@ -2,7 +2,12 @@
  * Pet Controller - Unit Tests
  */
 const { mockQuery, mockTransaction, mockReq, mockRes, mockNext } = require('./setup');
-const { evolvePet, performAction } = require('../src/controllers/pet.controller');
+const {
+    evolvePet,
+    performAction,
+    getDailyQuests,
+    claimDailyQuestReward,
+} = require('../src/controllers/pet.controller');
 
 function makePetState(overrides = {}) {
     return {
@@ -357,6 +362,119 @@ describe('Pet Controller', () => {
             );
             const preferredItems = inventoryCheckCall?.[1]?.[1];
             expect(preferredItems).toEqual(['basic_food', 'premium_food']);
+            expect(next).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('Daily Quests', () => {
+        it('GET /couple/pet/daily-quests should return snapshot with canClaim=true when all quests complete', async () => {
+            const petState = makePetState({
+                health: 80,
+                mood: 80,
+                hunger: 80,
+                cleanliness: 80,
+            });
+
+            mockQuery
+                .mockResolvedValueOnce({ rows: [petState] }) // ensurePet
+                .mockResolvedValueOnce({ rows: [{ partner_id: 'uuid-user-b' }] }) // getPartnerId
+                .mockResolvedValueOnce({ rows: [{ cnt: 4 }] }) // myActionsToday
+                .mockResolvedValueOnce({ rows: [{ cnt: 2 }] }) // partnerActionsToday
+                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // expeditions collected today
+                .mockResolvedValueOnce({ rows: [] }); // not yet claimed
+
+            const req = mockReq({
+                dbUser: { id: 'uuid-user-a', display_name: 'Alice' },
+                coupleRoom: { id: 'room-1' },
+            });
+            const res = mockRes();
+            const next = mockNext();
+
+            await getDailyQuests(req, res, next);
+
+            expect(res.status).not.toHaveBeenCalled();
+            expect(res.json).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        claimed: false,
+                        canClaim: true,
+                        completedCount: 4,
+                        totalCount: 4,
+                    }),
+                })
+            );
+            expect(next).not.toHaveBeenCalled();
+        });
+
+        it('POST /couple/pet/daily-quests/claim should award coins once when eligible', async () => {
+            const petState = makePetState({
+                health: 82,
+                mood: 84,
+                hunger: 80,
+                cleanliness: 78,
+            });
+
+            mockQuery
+                .mockResolvedValueOnce({ rows: [petState] }) // ensurePet
+                .mockResolvedValueOnce({ rows: [{ partner_id: 'uuid-user-b' }] }) // getPartnerId
+                .mockResolvedValueOnce({ rows: [{ cnt: 4 }] }) // myActionsToday
+                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // partnerActionsToday
+                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // expeditions collected today
+                .mockResolvedValueOnce({ rows: [] }) // claim check: not claimed
+                .mockResolvedValueOnce({ rows: [{ id: 'reward-log-1' }] }) // insert reward log
+                .mockResolvedValueOnce({ rows: [] }) // update love coins
+                .mockResolvedValueOnce({ rows: [{ love_coins: 236 }] }); // select updated love coins
+
+            const req = mockReq({
+                dbUser: { id: 'uuid-user-a', display_name: 'Alice' },
+                coupleRoom: { id: 'room-1' },
+            });
+            const res = mockRes();
+            const next = mockNext();
+
+            await claimDailyQuestReward(req, res, next);
+
+            expect(res.status).not.toHaveBeenCalled();
+            expect(res.json).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        coinsAwarded: 36,
+                        loveCoins: 236,
+                    }),
+                })
+            );
+            expect(next).not.toHaveBeenCalled();
+        });
+
+        it('POST /couple/pet/daily-quests/claim should return 409 when already claimed', async () => {
+            const petState = makePetState({
+                health: 82,
+                mood: 84,
+                hunger: 80,
+                cleanliness: 78,
+            });
+
+            mockQuery
+                .mockResolvedValueOnce({ rows: [petState] }) // ensurePet
+                .mockResolvedValueOnce({ rows: [{ partner_id: 'uuid-user-b' }] }) // getPartnerId
+                .mockResolvedValueOnce({ rows: [{ cnt: 4 }] }) // myActionsToday
+                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // partnerActionsToday
+                .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // expeditions collected today
+                .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // already claimed
+
+            const req = mockReq({
+                dbUser: { id: 'uuid-user-a', display_name: 'Alice' },
+                coupleRoom: { id: 'room-1' },
+            });
+            const res = mockRes();
+            const next = mockNext();
+
+            await claimDailyQuestReward(req, res, next);
+
+            expect(res.status).toHaveBeenCalledWith(409);
+            expect(res.json).toHaveBeenCalledWith(
+                expect.objectContaining({ error: expect.stringContaining('đã nhận thưởng') })
+            );
             expect(next).not.toHaveBeenCalled();
         });
     });
