@@ -22,9 +22,17 @@ const PREMIUM_FEED_CONFIG = {
 };
 
 // Love Coin rewards for pet care actions
-const PET_CARE_COIN_REWARD = 2;        // coins per care action
-const PET_FIRST_CARE_COIN_BONUS = 3;   // bonus for first action of the day
-const PET_COOP_COIN_BONUS = 5;         // bonus when both partners contribute same day
+const PET_CARE_COIN_REWARD = 3;        // coins per care action
+const PET_FIRST_CARE_COIN_BONUS = 4;   // bonus for first action of the day
+const PET_COOP_COIN_BONUS = 6;         // bonus when both partners contribute same day
+
+const SHOP_PRICES = {
+    basic_food: 4,
+    basic_soap: 6,
+    basic_toy: 6,
+    premium_food: 12,
+    evolution_stone: 220,
+};
 
 const FEED_ITEM_IDS = ['basic_food', 'premium_food'];
 
@@ -167,7 +175,7 @@ function buildCooldowns(pet) {
 /**
  * Format pet row into the response shape expected by Flutter.
  */
-function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins = 0, inventory = []) {
+function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins = 0, inventory = [], expedition = null) {
     const cooldowns = buildCooldowns(pet);
 
     // Calculate Yin-Yang imbalance
@@ -191,6 +199,7 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
         imbalancePenalty,
         loveCoins,
         inventory,
+        expedition,
         cooldowns,
         partnerContribution: {
             myActions: myActionsToday,
@@ -203,6 +212,56 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
             lastPettedAt: pet.last_petted_at ? new Date(pet.last_petted_at).toISOString() : null,
         },
     };
+}
+
+/**
+ * Get current expedition snapshot for UI state.
+ * Returns either the active exploring expedition or a returned one waiting for collection.
+ */
+async function getCurrentExpedition(coupleRoomId, client) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    try {
+        await qFn(
+            `UPDATE pet_expeditions
+             SET status = 'returned'
+             WHERE couple_room_id = $1 AND status = 'exploring' AND ends_at <= NOW()`,
+            [coupleRoomId]
+        );
+
+        const result = await qFn(
+            `SELECT id, status, expedition_type, duration_hours, started_at, ends_at, loot_data
+             FROM pet_expeditions
+             WHERE couple_room_id = $1 AND status IN ('exploring', 'returned')
+             ORDER BY created_at DESC LIMIT 1`,
+            [coupleRoomId]
+        );
+
+        if (!result.rows.length) {
+            return null;
+        }
+
+        const exp = result.rows[0];
+        const typeConfig = EXPEDITION_TYPES[exp.expedition_type] || EXPEDITION_TYPES.forest;
+
+        return {
+            id: exp.id,
+            status: exp.status,
+            type: exp.expedition_type,
+            typeLabel: typeConfig.label,
+            typeEmoji: typeConfig.emoji,
+            duration: exp.duration_hours,
+            startedAt: exp.started_at,
+            endsAt: exp.ends_at,
+            loot: exp.status === 'returned' ? exp.loot_data : null,
+        };
+    } catch (err) {
+        // Backward compatibility when migration 016 has not been applied yet.
+        if (err.code === '42P01') {
+            return null;
+        }
+        throw err;
+    }
 }
 
 /**
@@ -383,8 +442,16 @@ async function getPetState(req, res, next) {
 
         const invData = await query('SELECT item_id, quantity FROM pet_inventory WHERE couple_room_id = $1', [roomId]);
         const inventory = invData.rows.map(r => ({ id: r.item_id, qty: r.quantity }));
+        const expedition = await getCurrentExpedition(roomId);
 
-        const responseData = formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins, inventory);
+        const responseData = formatPetResponse(
+            pet,
+            myActionsToday,
+            partnerActionsToday,
+            loveCoins,
+            inventory,
+            expedition
+        );
 
         return res.json({
             data: responseData,
@@ -468,6 +535,14 @@ async function performAction(req, res, next) {
                     [roomId, decay.health, decay.mood, decay.hunger, decay.cleanliness]
                 );
                 pet = decayed.rows[0] || pet;
+            }
+
+            // Prevent care actions while the pet is actively exploring.
+            const expedition = await getCurrentExpedition(roomId, client);
+            if (expedition?.status === 'exploring') {
+                const err = new Error('Pet đang đi viễn chinh, hãy chờ pet trở về nhé!');
+                err.statusCode = 400;
+                throw err;
             }
 
             // 3. Check cooldown
@@ -1111,14 +1186,6 @@ async function buyShopItem(req, res, next) {
         const { itemId, quantity } = req.body;
         const qty = parseInt(quantity) || 1;
 
-        const SHOP_PRICES = {
-            basic_food: 10,
-            basic_soap: 15,
-            basic_toy: 15,
-            premium_food: 30,
-            evolution_stone: 500, // Very expensive
-        };
-
         const pricePerUnit = SHOP_PRICES[itemId];
         if (!pricePerUnit) {
             return res.status(400).json({ error: 'Mặt hàng không tồn tại trong Cửa Hàng' });
@@ -1196,10 +1263,10 @@ async function buyShopItem(req, res, next) {
 // ═══════════════════════════════════════════════════════════════
 
 const EXPEDITION_TYPES = {
-    forest:   { label: 'Rừng Thần Tiên',   emoji: '🌲', minLevel: 1 },
-    beach:    { label: 'Bãi Biển Tình Yêu', emoji: '🏖️', minLevel: 2 },
-    mountain: { label: 'Đỉnh Núi Mây',     emoji: '⛰️', minLevel: 4 },
-    cave:     { label: 'Hang Đá Bí Ẩn',    emoji: '🕳️', minLevel: 6 },
+    forest: { label: 'Rừng Thần Tiên', emoji: '🌲', minLevel: 1 },
+    beach: { label: 'Bãi Biển Tình Yêu', emoji: '🏖️', minLevel: 2 },
+    mountain: { label: 'Đỉnh Núi Mây', emoji: '⛰️', minLevel: 4 },
+    cave: { label: 'Hang Đá Bí Ẩn', emoji: '🕳️', minLevel: 6 },
 };
 
 const EXPEDITION_DURATIONS = [4, 6, 8]; // hours
@@ -1207,24 +1274,24 @@ const EXPEDITION_DURATIONS = [4, 6, 8]; // hours
 // Loot tables per expedition type + duration tier
 const EXPEDITION_LOOT_TABLE = {
     forest: {
-        common:   [{ type: 'coins', amount: 8 }, { type: 'coins', amount: 12 }, { type: 'item', itemId: 'basic_food', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 20 }, { type: 'item', itemId: 'basic_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
-        rare:     [{ type: 'coins', amount: 35 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
+        common: [{ type: 'coins', amount: 12 }, { type: 'coins', amount: 16 }, { type: 'item', itemId: 'basic_food', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 26 }, { type: 'item', itemId: 'basic_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
+        rare: [{ type: 'coins', amount: 42 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
     },
     beach: {
-        common:   [{ type: 'coins', amount: 12 }, { type: 'item', itemId: 'basic_soap', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 25 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_food', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 50 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
+        common: [{ type: 'coins', amount: 16 }, { type: 'item', itemId: 'basic_soap', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 32 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_food', qty: 2 }],
+        rare: [{ type: 'coins', amount: 60 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
     },
     mountain: {
-        common:   [{ type: 'coins', amount: 18 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 35 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 70 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }],
+        common: [{ type: 'coins', amount: 24 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 44 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
+        rare: [{ type: 'coins', amount: 85 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }],
     },
     cave: {
-        common:   [{ type: 'coins', amount: 25 }, { type: 'item', itemId: 'premium_food', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 50 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 100 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }, { type: 'item', itemId: 'premium_food', qty: 3 }],
+        common: [{ type: 'coins', amount: 34 }, { type: 'item', itemId: 'premium_food', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 64 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
+        rare: [{ type: 'coins', amount: 120 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }, { type: 'item', itemId: 'premium_food', qty: 3 }],
     },
 };
 
@@ -1523,18 +1590,18 @@ async function collectExpeditionLoot(req, res, next) {
 // ═══════════════════════════════════════════════════════════════
 
 const ACHIEVEMENT_DEFINITIONS = [
-    { id: 'first_care',       label: '🥚 Người Mới',             description: 'Chăm sóc pet lần đầu tiên',           target: 1,    coins: 10 },
-    { id: 'caretaker_50',     label: '🍼 Bảo Mẫu Siêng Năng',   description: 'Chăm sóc pet 50 lần',                  target: 50,   coins: 50 },
-    { id: 'caretaker_200',    label: '👨‍⚕️ Bác Sĩ Thú Y',         description: 'Chăm sóc pet 200 lần',                 target: 200,  coins: 150 },
-    { id: 'first_evolution',  label: '💎 Tiến Hóa Lần Đầu',     description: 'Tiến hóa pet lần đầu tiên',            target: 1,    coins: 30 },
-    { id: 'max_evolution',    label: '🌟 Hình Thái Cuối Cùng',   description: 'Pet đạt cấp tiến hóa tối đa (Lv.8)',   target: 8,    coins: 500 },
-    { id: 'explorer_10',     label: '🏔️ Nhà Thám Hiểm',         description: 'Hoàn thành 10 cuộc viễn chinh',        target: 10,   coins: 80 },
-    { id: 'explorer_50',     label: '🗺️ Phượt Thủ Chuyên Nghiệp', description: 'Hoàn thành 50 cuộc viễn chinh',      target: 50,   coins: 300 },
-    { id: 'rich_1000',       label: '💰 Đại Gia',                description: 'Sở hữu 1000 Love Coins cùng lúc',       target: 1000, coins: 100 },
-    { id: 'balance_7',       label: '⚖️ Cân Bằng Hoàn Hảo',     description: 'Giữ Yin-Yang balance 7 ngày liên tiếp', target: 7,    coins: 120 },
-    { id: 'pet_age_30',      label: '🎂 1 Tháng Bên Nhau',      description: 'Nuôi pet đạt 30 ngày tuổi',            target: 30,   coins: 60  },
-    { id: 'pet_age_100',     label: '💝 100 Ngày Yêu Thương',   description: 'Nuôi pet đạt 100 ngày tuổi',           target: 100,  coins: 200 },
-    { id: 'shopper_20',      label: '🛍️ Tín Đồ Mua Sắm',       description: 'Mua 20 vật phẩm từ cửa hàng',          target: 20,   coins: 40  },
+    { id: 'first_care', label: '🥚 Người Mới', description: 'Chăm sóc pet lần đầu tiên', target: 1, coins: 10 },
+    { id: 'caretaker_50', label: '🍼 Bảo Mẫu Siêng Năng', description: 'Chăm sóc pet 50 lần', target: 50, coins: 50 },
+    { id: 'caretaker_200', label: '👨‍⚕️ Bác Sĩ Thú Y', description: 'Chăm sóc pet 200 lần', target: 200, coins: 150 },
+    { id: 'first_evolution', label: '💎 Tiến Hóa Lần Đầu', description: 'Tiến hóa pet lần đầu tiên', target: 1, coins: 30 },
+    { id: 'max_evolution', label: '🌟 Hình Thái Cuối Cùng', description: 'Pet đạt cấp tiến hóa tối đa (Lv.8)', target: 8, coins: 500 },
+    { id: 'explorer_10', label: '🏔️ Nhà Thám Hiểm', description: 'Hoàn thành 10 cuộc viễn chinh', target: 10, coins: 80 },
+    { id: 'explorer_50', label: '🗺️ Phượt Thủ Chuyên Nghiệp', description: 'Hoàn thành 50 cuộc viễn chinh', target: 50, coins: 300 },
+    { id: 'rich_1000', label: '💰 Đại Gia', description: 'Sở hữu 1000 Love Coins cùng lúc', target: 1000, coins: 100 },
+    { id: 'balance_7', label: '⚖️ Cân Bằng Hoàn Hảo', description: 'Giữ Yin-Yang balance 7 ngày liên tiếp', target: 7, coins: 120 },
+    { id: 'pet_age_30', label: '🎂 1 Tháng Bên Nhau', description: 'Nuôi pet đạt 30 ngày tuổi', target: 30, coins: 60 },
+    { id: 'pet_age_100', label: '💝 100 Ngày Yêu Thương', description: 'Nuôi pet đạt 100 ngày tuổi', target: 100, coins: 200 },
+    { id: 'shopper_20', label: '🛍️ Tín Đồ Mua Sắm', description: 'Mua 20 vật phẩm từ cửa hàng', target: 20, coins: 40 },
 ];
 
 /**
@@ -1574,18 +1641,18 @@ async function checkAndUpdateAchievements(coupleRoomId) {
 
         // Calculate progress for each achievement
         const progressMap = {
-            first_care:      totalCareActions,
-            caretaker_50:    totalCareActions,
-            caretaker_200:   totalCareActions,
+            first_care: totalCareActions,
+            caretaker_50: totalCareActions,
+            caretaker_200: totalCareActions,
             first_evolution: Math.max(pet.evolution_level - 1, 0),
-            max_evolution:   pet.evolution_level,
-            explorer_10:     totalExpeditions,
-            explorer_50:     totalExpeditions,
-            rich_1000:       currentCoins,
-            balance_7:       balancedStreak,
-            pet_age_30:      petAge,
-            pet_age_100:     petAge,
-            shopper_20:      totalPurchases,
+            max_evolution: pet.evolution_level,
+            explorer_10: totalExpeditions,
+            explorer_50: totalExpeditions,
+            rich_1000: currentCoins,
+            balance_7: balancedStreak,
+            pet_age_30: petAge,
+            pet_age_100: petAge,
+            shopper_20: totalPurchases,
         };
 
         const newlyUnlocked = [];
@@ -1706,8 +1773,8 @@ async function getAchievements(req, res, next) {
 //  Daily Login Reward
 // ═══════════════════════════════════════════════════════════════
 
-const DAILY_REWARD_SCHEDULE = [5, 8, 12, 15, 18, 22, 30]; // Day 1-7 coin rewards
-const DAILY_REWARD_WEEKLY_BONUS = 30; // Bonus on day 7
+const DAILY_REWARD_SCHEDULE = [8, 10, 12, 15, 18, 22, 28]; // Day 1-7 coin rewards
+const DAILY_REWARD_WEEKLY_BONUS = 25; // Bonus on each 7-day milestone
 
 /**
  * Check and award daily login reward. Called from getPetState.
