@@ -3,6 +3,10 @@ const { v4: uuidv4 } = require('uuid');
 const { getIO } = require('../socket/socket.handler');
 const { sendPushNotification } = require('../config/firebase');
 const logger = require('../config/logger');
+const {
+    PERSONALITY_LOOKBACK_DAYS,
+    PET_PERSONALITY_DEFINITIONS,
+} = require('../config/pet_personality.config');
 
 // ═══════════════════════════════════════════════════════════════
 //  Game Balance Configuration
@@ -22,14 +26,70 @@ const PREMIUM_FEED_CONFIG = {
 };
 
 // Love Coin rewards for pet care actions
-const PET_CARE_COIN_REWARD = 2;        // coins per care action
-const PET_FIRST_CARE_COIN_BONUS = 3;   // bonus for first action of the day
-const PET_COOP_COIN_BONUS = 5;         // bonus when both partners contribute same day
+const PET_CARE_COIN_REWARD = 3;        // coins per care action
+const PET_FIRST_CARE_COIN_BONUS = 4;   // bonus for first action of the day
+const PET_COOP_COIN_BONUS = 6;         // bonus when both partners contribute same day
+
+const SHOP_PRICES = {
+    basic_food: 4,
+    basic_soap: 6,
+    basic_toy: 6,
+    premium_food: 12,
+    evolution_stone: 220,
+};
 
 const FEED_ITEM_IDS = ['basic_food', 'premium_food'];
 
 const VALID_ACTIONS = Object.keys(ACTION_CONFIG);
 const COOPERATIVE_BONUS_XP = 25;
+
+const PET_DAILY_QUEST_REWARD_COINS = 36;
+const PET_DAILY_QUEST_DEFINITIONS = [
+    {
+        id: 'self_care_3',
+        icon: '🍖',
+        title: 'Tự chăm pet 3 lần',
+        description: 'Bạn thực hiện tối thiểu 3 hành động chăm pet trong ngày',
+        target: 3,
+    },
+    {
+        id: 'both_contribute',
+        icon: '💞',
+        title: 'Cả hai cùng chăm pet',
+        description: 'Mỗi người ít nhất 1 hành động chăm pet trong ngày',
+        target: 1,
+    },
+    {
+        id: 'avg_stat_75',
+        icon: '✨',
+        title: 'Giữ chỉ số trung bình ≥ 75',
+        description: 'Giữ trung bình 4 chỉ số của pet đạt từ 75 điểm',
+        target: 75,
+    },
+    {
+        id: 'expedition_collected_1',
+        icon: '🗺️',
+        title: 'Hoàn thành 1 viễn chinh',
+        description: 'Thu thập thưởng từ ít nhất 1 chuyến viễn chinh trong ngày',
+        target: 1,
+    },
+];
+
+const PERSONALITY_TRAIT_LABELS = {
+    consistency: 'Nhịp Chăm Đều',
+    teamwork: 'Phối Hợp Cặp Đôi',
+    nurturing: 'Ưu Tiên Cho Ăn',
+    playful: 'Độ Ham Chơi',
+    hygiene: 'Độ Sạch Sẽ',
+    affection: 'Độ Vuốt Ve',
+    explorer: 'Tinh Thần Viễn Chinh',
+    shopper: 'Năng Lực Tích Lũy',
+    balance: 'Cân Bằng Âm Dương',
+    vitality: 'Sinh Lực Hiện Tại',
+    devotion: 'Độ Chăm Bền Bỉ',
+    discipline: 'Kỷ Luật Chăm Sóc',
+    moodCare: 'Quan Tâm Cảm Xúc',
+};
 
 // Decay: −3 per stat for every 4 hours of inactivity
 const DECAY_INTERVAL_HOURS = 4;
@@ -61,6 +121,496 @@ function computeXpToNextLevel(totalXp) {
 
 function toUTCDateKey(date = new Date()) {
     return date.toISOString().slice(0, 10);
+}
+
+function getDailyQuestRewardKey(date = new Date()) {
+    return `pet_daily_quest_${toUTCDateKey(date)}`;
+}
+
+function buildDailyQuestItems({ myActionsToday, partnerActionsToday, averageStat, expeditionsCollectedToday }) {
+    const bothContributed = myActionsToday > 0 && partnerActionsToday > 0;
+
+    return PET_DAILY_QUEST_DEFINITIONS.map((def) => {
+        let progress = 0;
+
+        switch (def.id) {
+            case 'self_care_3':
+                progress = myActionsToday;
+                break;
+            case 'both_contribute':
+                progress = bothContributed ? 1 : 0;
+                break;
+            case 'avg_stat_75':
+                progress = averageStat;
+                break;
+            case 'expedition_collected_1':
+                progress = expeditionsCollectedToday;
+                break;
+            default:
+                progress = 0;
+                break;
+        }
+
+        const normalizedProgress = Math.max(0, Math.min(progress, def.target));
+
+        return {
+            id: def.id,
+            icon: def.icon,
+            title: def.title,
+            description: def.description,
+            progress: normalizedProgress,
+            target: def.target,
+            isCompleted: normalizedProgress >= def.target,
+        };
+    });
+}
+
+async function getDailyQuestSnapshot(coupleRoomId, userId, client, context = {}) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    const pet = context.pet || await ensurePet(coupleRoomId, client);
+    const partnerId = context.partnerId !== undefined
+        ? context.partnerId
+        : await getPartnerId(coupleRoomId, userId, client);
+
+    const myActionsToday = context.myActionsToday !== undefined
+        ? context.myActionsToday
+        : await countTodayActions(coupleRoomId, userId, client);
+
+    const partnerActionsToday = context.partnerActionsToday !== undefined
+        ? context.partnerActionsToday
+        : (partnerId ? await countTodayActions(coupleRoomId, partnerId, client) : 0);
+
+    let expeditionsCollectedToday = 0;
+    try {
+        const expeditionRes = await qFn(
+            `SELECT COUNT(*)::int AS cnt
+             FROM pet_expeditions
+             WHERE couple_room_id = $1
+               AND status = 'collected'
+               AND collected_at IS NOT NULL
+               AND (collected_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+            [coupleRoomId]
+        );
+        expeditionsCollectedToday = expeditionRes.rows[0]?.cnt || 0;
+    } catch (err) {
+        // Backward compatibility when expedition table is unavailable.
+        if (err.code !== '42P01') throw err;
+    }
+
+    const averageStat = Math.round(
+        ((pet.health || 0) + (pet.mood || 0) + (pet.hunger || 0) + (pet.cleanliness || 0)) / 4
+    );
+
+    const quests = buildDailyQuestItems({
+        myActionsToday,
+        partnerActionsToday,
+        averageStat,
+        expeditionsCollectedToday,
+    });
+
+    const completedCount = quests.filter((quest) => quest.isCompleted).length;
+    const rewardKey = getDailyQuestRewardKey();
+
+    let claimed = false;
+    try {
+        const claimRes = await qFn(
+            `SELECT 1
+             FROM coin_reward_logs
+             WHERE couple_room_id = $1
+               AND reward_type = 'pet_daily_quest'
+               AND reward_key = $2
+             LIMIT 1`,
+            [coupleRoomId, rewardKey]
+        );
+        claimed = claimRes.rows.length > 0;
+    } catch (err) {
+        // Backward compatibility when reward ledger has not been migrated yet.
+        if (err.code !== '42P01') throw err;
+        claimed = false;
+    }
+
+    return {
+        dateKey: toUTCDateKey(),
+        rewardKey,
+        rewardCoins: PET_DAILY_QUEST_REWARD_COINS,
+        claimed,
+        completedCount,
+        totalCount: quests.length,
+        canClaim: !claimed && completedCount === quests.length,
+        quests,
+    };
+}
+
+function safeInt(value, fallback = 0) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.trunc(value);
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function clampPercent(value) {
+    return Math.max(0, Math.min(100, Math.round(value || 0)));
+}
+
+function hashToUnitInterval(input) {
+    const text = String(input || '');
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+        hash ^= text.charCodeAt(i);
+        hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return ((hash >>> 0) % 1000000) / 1000000;
+}
+
+function buildDefaultPersonalityMetrics(pet) {
+    const vitality = clampPercent(
+        ((safeInt(pet?.health) + safeInt(pet?.mood) + safeInt(pet?.hunger) + safeInt(pet?.cleanliness)) / 4)
+    );
+
+    return {
+        consistency: 0,
+        teamwork: 0,
+        nurturing: 0,
+        playful: 0,
+        hygiene: 0,
+        affection: 0,
+        explorer: 0,
+        shopper: 0,
+        balance: 0,
+        vitality,
+        devotion: 0,
+        discipline: 50,
+        moodCare: clampPercent(safeInt(pet?.mood, 0)),
+    };
+}
+
+function getPersonalityRequirementPenalty(definition, metrics) {
+    const requirements = definition.requirements || {};
+    let penalty = 0;
+
+    for (const [rawKey, value] of Object.entries(requirements)) {
+        const threshold = Number(value);
+        if (!Number.isFinite(threshold)) continue;
+
+        if (rawKey.endsWith('Min')) {
+            const key = rawKey.slice(0, -3);
+            if ((metrics[key] ?? 0) < threshold) {
+                penalty += (threshold - (metrics[key] ?? 0)) * 0.9;
+            }
+        } else if (rawKey.endsWith('Max')) {
+            const key = rawKey.slice(0, -3);
+            if ((metrics[key] ?? 0) > threshold) {
+                penalty += ((metrics[key] ?? 0) - threshold) * 0.9;
+            }
+        }
+    }
+
+    return penalty;
+}
+
+function scorePersonality(definition, metrics, roomSeed) {
+    let score = 8;
+
+    for (const [metric, weight] of Object.entries(definition.weights || {})) {
+        const numericWeight = Number(weight);
+        if (!Number.isFinite(numericWeight)) continue;
+        score += (metrics[metric] || 0) * numericWeight;
+    }
+
+    score -= getPersonalityRequirementPenalty(definition, metrics);
+
+    // Stable tie-breaker so each couple feels unique even with close behavior.
+    const jitter = (hashToUnitInterval(`${roomSeed}:${definition.id}`) - 0.5) * 8;
+    score += jitter;
+
+    return Math.max(0, score);
+}
+
+function buildDominantTraits(metrics) {
+    return Object.entries(metrics)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([id, value]) => ({
+            id,
+            label: PERSONALITY_TRAIT_LABELS[id] || id,
+            value: clampPercent(value),
+        }));
+}
+
+function buildSkillState(pet, skill) {
+    if (!skill) {
+        return {
+            isReady: true,
+            readyAt: null,
+            lastTriggeredAt: null,
+            cooldownMinutes: 0,
+            remainingSeconds: 0,
+        };
+    }
+
+    const cooldownMinutes = Math.max(1, safeInt(skill.cooldownMinutes, 120));
+    const lastTriggeredAt = pet?.personality_skill_last_triggered_at
+        ? new Date(pet.personality_skill_last_triggered_at)
+        : null;
+
+    if (!lastTriggeredAt || Number.isNaN(lastTriggeredAt.getTime())) {
+        return {
+            isReady: true,
+            readyAt: null,
+            lastTriggeredAt: null,
+            cooldownMinutes,
+            remainingSeconds: 0,
+        };
+    }
+
+    const readyAtDate = new Date(lastTriggeredAt.getTime() + (cooldownMinutes * 60 * 1000));
+    const now = Date.now();
+    const remainingMs = readyAtDate.getTime() - now;
+    const isReady = remainingMs <= 0;
+
+    return {
+        isReady,
+        readyAt: readyAtDate.toISOString(),
+        lastTriggeredAt: lastTriggeredAt.toISOString(),
+        cooldownMinutes,
+        remainingSeconds: isReady ? 0 : Math.ceil(remainingMs / 1000),
+    };
+}
+
+function buildPersonalitySnapshotFromMetrics({ pet, metrics, roomSeed }) {
+    const scored = PET_PERSONALITY_DEFINITIONS
+        .map((definition) => ({
+            ...definition,
+            rawScore: scorePersonality(definition, metrics, roomSeed),
+        }))
+        .sort((a, b) => b.rawScore - a.rawScore);
+
+    const maxRaw = scored[0]?.rawScore ?? 1;
+    const minRaw = scored[scored.length - 1]?.rawScore ?? 0;
+    const range = Math.max(maxRaw - minRaw, 0.0001);
+
+    const personalities = scored.map((entry, index) => {
+        const resonance = clampPercent(((entry.rawScore - minRaw) / range) * 100);
+        return {
+            id: entry.id,
+            emoji: entry.emoji,
+            name: entry.name,
+            description: entry.description,
+            resonance,
+            isActive: index === 0,
+            requirements: entry.requirements || {},
+            skill: {
+                id: entry.skill?.id,
+                name: entry.skill?.name,
+                description: entry.skill?.description,
+                triggerActions: Array.isArray(entry.skill?.triggerActions)
+                    ? entry.skill.triggerActions
+                    : [],
+                cooldownMinutes: Math.max(1, safeInt(entry.skill?.cooldownMinutes, 120)),
+                bonusStats: entry.skill?.bonusStats || {},
+                bonusXp: safeInt(entry.skill?.bonusXp, 0),
+                bonusCoins: safeInt(entry.skill?.bonusCoins, 0),
+            },
+        };
+    });
+
+    const active = personalities[0] || null;
+    const skillState = buildSkillState(pet, active?.skill);
+
+    return {
+        generatedAt: new Date().toISOString(),
+        lookbackDays: PERSONALITY_LOOKBACK_DAYS,
+        metrics,
+        dominantTraits: buildDominantTraits(metrics),
+        active,
+        skillState,
+        personalities,
+    };
+}
+
+async function getPetPersonalitySnapshot(coupleRoomId, userId, client, context = {}) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    const pet = context.pet || await ensurePet(coupleRoomId, client);
+    const partnerId = context.partnerId !== undefined
+        ? context.partnerId
+        : await getPartnerId(coupleRoomId, userId, client);
+
+    const metrics = buildDefaultPersonalityMetrics(pet);
+    const roomSeed = pet?.personality_signature_seed || String(coupleRoomId || 'room');
+
+    let summaryRows = [];
+    let dailyRows = [];
+
+    try {
+        const summaryRes = await qFn(
+            `SELECT
+                COUNT(*) FILTER (WHERE action_type IN ('feed', 'pet', 'bathe', 'play'))::int AS total_care,
+                COUNT(*) FILTER (WHERE action_type = 'feed')::int AS feed_count,
+                COUNT(*) FILTER (WHERE action_type = 'pet')::int AS pet_count,
+                COUNT(*) FILTER (WHERE action_type = 'bathe')::int AS bathe_count,
+                COUNT(*) FILTER (WHERE action_type = 'play')::int AS play_count,
+                COUNT(*) FILTER (WHERE action_type = 'shop_purchase')::int AS shop_count
+             FROM pet_care_actions
+             WHERE couple_room_id = $1
+               AND (created_at AT TIME ZONE 'UTC')::date >= (CURRENT_DATE - INTERVAL '${PERSONALITY_LOOKBACK_DAYS - 1} days')`,
+            [coupleRoomId]
+        );
+
+        const dailyRes = await qFn(
+            `SELECT
+                (created_at AT TIME ZONE 'UTC')::date AS day,
+                user_id,
+                COUNT(*)::int AS cnt
+             FROM pet_care_actions
+             WHERE couple_room_id = $1
+               AND action_type IN ('feed', 'pet', 'bathe', 'play')
+               AND (created_at AT TIME ZONE 'UTC')::date >= (CURRENT_DATE - INTERVAL '${PERSONALITY_LOOKBACK_DAYS - 1} days')
+             GROUP BY (created_at AT TIME ZONE 'UTC')::date, user_id`,
+            [coupleRoomId]
+        );
+
+        summaryRows = summaryRes.rows || [];
+        dailyRows = dailyRes.rows || [];
+    } catch (err) {
+        if (err.code !== '42P01') throw err;
+    }
+
+    const summary = summaryRows[0] || {};
+    const totalCare = safeInt(summary.total_care, 0);
+    const feedCount = safeInt(summary.feed_count, 0);
+    const petCount = safeInt(summary.pet_count, 0);
+    const batheCount = safeInt(summary.bathe_count, 0);
+    const playCount = safeInt(summary.play_count, 0);
+    const shopCount = safeInt(summary.shop_count, 0);
+
+    const dayMap = new Map();
+    for (const row of dailyRows) {
+        const dayKey = row.day instanceof Date
+            ? toUTCDateKey(row.day)
+            : String(row.day).slice(0, 10);
+        const current = dayMap.get(dayKey) || { my: 0, partner: 0, total: 0 };
+        const cnt = safeInt(row.cnt, 0);
+
+        current.total += cnt;
+
+        if (String(row.user_id) === String(userId)) {
+            current.my += cnt;
+        } else if (partnerId && String(row.user_id) === String(partnerId)) {
+            current.partner += cnt;
+        } else if (!partnerId) {
+            current.my += cnt;
+        }
+
+        dayMap.set(dayKey, current);
+    }
+
+    if (context.myActionsToday !== undefined || context.partnerActionsToday !== undefined) {
+        const todayKey = toUTCDateKey();
+        const current = dayMap.get(todayKey) || { my: 0, partner: 0, total: 0 };
+        if (context.myActionsToday !== undefined) {
+            current.my = safeInt(context.myActionsToday, current.my);
+        }
+        if (context.partnerActionsToday !== undefined) {
+            current.partner = safeInt(context.partnerActionsToday, current.partner);
+        }
+        current.total = current.my + current.partner;
+        dayMap.set(todayKey, current);
+    }
+
+    let activeDays = 0;
+    let cooperativeDays = 0;
+    let balanceSum = 0;
+
+    for (const day of dayMap.values()) {
+        if (day.total <= 0) continue;
+
+        activeDays += 1;
+        if (day.my > 0 && day.partner > 0) {
+            cooperativeDays += 1;
+        }
+
+        const dayBalance = (1 - (Math.abs(day.my - day.partner) / Math.max(day.total, 1))) * 100;
+        balanceSum += Math.max(0, dayBalance);
+    }
+
+    const avgActionsPerActiveDay = activeDays > 0 ? totalCare / activeDays : 0;
+
+    let expeditionCount = 0;
+    try {
+        const expeditionRes = await qFn(
+            `SELECT COUNT(*)::int AS cnt
+             FROM pet_expeditions
+             WHERE couple_room_id = $1
+               AND status = 'collected'
+               AND collected_at IS NOT NULL
+               AND (collected_at AT TIME ZONE 'UTC')::date >= (CURRENT_DATE - INTERVAL '${PERSONALITY_LOOKBACK_DAYS - 1} days')`,
+            [coupleRoomId]
+        );
+        expeditionCount = safeInt(expeditionRes.rows[0]?.cnt, 0);
+    } catch (err) {
+        if (err.code !== '42P01') throw err;
+    }
+
+    metrics.consistency = clampPercent((activeDays / PERSONALITY_LOOKBACK_DAYS) * 100);
+    metrics.teamwork = clampPercent(activeDays > 0 ? (cooperativeDays / activeDays) * 100 : 0);
+    metrics.nurturing = clampPercent(totalCare > 0 ? (feedCount / totalCare) * 100 : 0);
+    metrics.playful = clampPercent(totalCare > 0 ? (playCount / totalCare) * 100 : 0);
+    metrics.hygiene = clampPercent(totalCare > 0 ? (batheCount / totalCare) * 100 : 0);
+    metrics.affection = clampPercent(totalCare > 0 ? (petCount / totalCare) * 100 : 0);
+    metrics.explorer = clampPercent(Math.min(100, expeditionCount * 18));
+    metrics.shopper = clampPercent(Math.min(100, shopCount * 12));
+    metrics.balance = clampPercent(activeDays > 0 ? (balanceSum / activeDays) : 0);
+    metrics.devotion = clampPercent((totalCare / (PERSONALITY_LOOKBACK_DAYS * 6)) * 100);
+    metrics.discipline = clampPercent(100 - (Math.abs(avgActionsPerActiveDay - 3) * 22));
+
+    return buildPersonalitySnapshotFromMetrics({
+        pet,
+        metrics,
+        roomSeed,
+    });
+}
+
+function evaluatePersonalitySkill({ pet, action, personalitySnapshot }) {
+    const noTrigger = {
+        triggered: false,
+        skillId: null,
+        skillName: null,
+        cooldownMinutes: 0,
+        bonusStats: {},
+        bonusXp: 0,
+        bonusCoins: 0,
+        message: null,
+    };
+
+    const active = personalitySnapshot?.active;
+    const skill = active?.skill;
+
+    if (!skill || !Array.isArray(skill.triggerActions)) {
+        return noTrigger;
+    }
+
+    if (!skill.triggerActions.includes(action)) {
+        return noTrigger;
+    }
+
+    const skillState = personalitySnapshot.skillState || buildSkillState(pet, skill);
+    if (!skillState.isReady) {
+        return noTrigger;
+    }
+
+    return {
+        triggered: true,
+        skillId: skill.id,
+        skillName: skill.name,
+        cooldownMinutes: safeInt(skill.cooldownMinutes, 120),
+        bonusStats: skill.bonusStats || {},
+        bonusXp: safeInt(skill.bonusXp, 0),
+        bonusCoins: safeInt(skill.bonusCoins, 0),
+        message: `${active?.emoji || '✨'} ${active?.name || 'Tính cách'} kích hoạt ${skill.name}!`,
+    };
 }
 
 function computeBalancedStreakFromRows(rows, maxDays = 30) {
@@ -167,7 +717,15 @@ function buildCooldowns(pet) {
 /**
  * Format pet row into the response shape expected by Flutter.
  */
-function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins = 0, inventory = []) {
+function formatPetResponse(
+    pet,
+    myActionsToday,
+    partnerActionsToday,
+    loveCoins = 0,
+    inventory = [],
+    expedition = null,
+    personality = null
+) {
     const cooldowns = buildCooldowns(pet);
 
     // Calculate Yin-Yang imbalance
@@ -191,6 +749,8 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
         imbalancePenalty,
         loveCoins,
         inventory,
+        expedition,
+        personality,
         cooldowns,
         partnerContribution: {
             myActions: myActionsToday,
@@ -203,6 +763,56 @@ function formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins =
             lastPettedAt: pet.last_petted_at ? new Date(pet.last_petted_at).toISOString() : null,
         },
     };
+}
+
+/**
+ * Get current expedition snapshot for UI state.
+ * Returns either the active exploring expedition or a returned one waiting for collection.
+ */
+async function getCurrentExpedition(coupleRoomId, client) {
+    const qFn = client ? client.query.bind(client) : query;
+
+    try {
+        await qFn(
+            `UPDATE pet_expeditions
+             SET status = 'returned'
+             WHERE couple_room_id = $1 AND status = 'exploring' AND ends_at <= NOW()`,
+            [coupleRoomId]
+        );
+
+        const result = await qFn(
+            `SELECT id, status, expedition_type, duration_hours, started_at, ends_at, loot_data
+             FROM pet_expeditions
+             WHERE couple_room_id = $1 AND status IN ('exploring', 'returned')
+             ORDER BY created_at DESC LIMIT 1`,
+            [coupleRoomId]
+        );
+
+        if (!result.rows.length) {
+            return null;
+        }
+
+        const exp = result.rows[0];
+        const typeConfig = EXPEDITION_TYPES[exp.expedition_type] || EXPEDITION_TYPES.forest;
+
+        return {
+            id: exp.id,
+            status: exp.status,
+            type: exp.expedition_type,
+            typeLabel: typeConfig.label,
+            typeEmoji: typeConfig.emoji,
+            duration: exp.duration_hours,
+            startedAt: exp.started_at,
+            endsAt: exp.ends_at,
+            loot: exp.status === 'returned' ? exp.loot_data : null,
+        };
+    } catch (err) {
+        // Backward compatibility when migration 016 has not been applied yet.
+        if (err.code === '42P01') {
+            return null;
+        }
+        throw err;
+    }
 }
 
 /**
@@ -376,6 +986,18 @@ async function getPetState(req, res, next) {
 
         // Check daily reward
         const dailyReward = await checkDailyReward(roomId, userId);
+        const dailyQuest = await getDailyQuestSnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
+        const personality = await getPetPersonalitySnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
 
         // Fetch currency and inventory
         const roomData = await query('SELECT love_coins FROM couple_rooms WHERE id = $1', [roomId]);
@@ -383,13 +1005,23 @@ async function getPetState(req, res, next) {
 
         const invData = await query('SELECT item_id, quantity FROM pet_inventory WHERE couple_room_id = $1', [roomId]);
         const inventory = invData.rows.map(r => ({ id: r.item_id, qty: r.quantity }));
+        const expedition = await getCurrentExpedition(roomId);
 
-        const responseData = formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins, inventory);
+        const responseData = formatPetResponse(
+            pet,
+            myActionsToday,
+            partnerActionsToday,
+            loveCoins,
+            inventory,
+            expedition,
+            personality
+        );
 
         return res.json({
             data: responseData,
             meta: {
                 dailyReward,
+                dailyQuest,
             }
         });
     } catch (err) {
@@ -470,6 +1102,14 @@ async function performAction(req, res, next) {
                 pet = decayed.rows[0] || pet;
             }
 
+            // Prevent care actions while the pet is actively exploring.
+            const expedition = await getCurrentExpedition(roomId, client);
+            if (expedition?.status === 'exploring') {
+                const err = new Error('Pet đang đi viễn chinh, hãy chờ pet trở về nhé!');
+                err.statusCode = 400;
+                throw err;
+            }
+
             // 3. Check cooldown
             const cooldowns = buildCooldowns(pet);
             if (!cooldowns[action].ready) {
@@ -545,6 +1185,20 @@ async function performAction(req, res, next) {
                 throw err;
             }
 
+            const partnerId = await getPartnerId(roomId, userId, client);
+            const partnerTodayBefore = partnerId ? await countTodayActions(roomId, partnerId, client) : 0;
+            const personalityBefore = await getPetPersonalitySnapshot(roomId, userId, client, {
+                pet,
+                partnerId,
+                myActionsToday: myToday,
+                partnerActionsToday: partnerTodayBefore,
+            });
+            const skillOutcome = evaluatePersonalitySkill({
+                pet,
+                action,
+                personalitySnapshot: personalityBefore,
+            });
+
             // 6. Calculate Yin-yang penalty
             const totalCare = pet.user1_interactions + pet.user2_interactions;
             let xpMultiplier = 1;
@@ -560,11 +1214,18 @@ async function performAction(req, res, next) {
                 ? { ...config, statDeltas: PREMIUM_FEED_CONFIG.statDeltas, xp: PREMIUM_FEED_CONFIG.xp }
                 : config;
 
+            const boostedStatDeltas = {
+                health: (effectiveConfig.statDeltas.health || 0) + safeInt(skillOutcome.bonusStats?.health, 0),
+                mood: (effectiveConfig.statDeltas.mood || 0) + safeInt(skillOutcome.bonusStats?.mood, 0),
+                hunger: (effectiveConfig.statDeltas.hunger || 0) + safeInt(skillOutcome.bonusStats?.hunger, 0),
+                cleanliness: (effectiveConfig.statDeltas.cleanliness || 0) + safeInt(skillOutcome.bonusStats?.cleanliness, 0),
+            };
+
             const newStats = {
-                health: Math.min((pet.health || 0) + (effectiveConfig.statDeltas.health || 0), 100),
-                mood: Math.min((pet.mood || 0) + (effectiveConfig.statDeltas.mood || 0), 100),
-                hunger: Math.min((pet.hunger || 0) + (effectiveConfig.statDeltas.hunger || 0), 100),
-                cleanliness: Math.min((pet.cleanliness || 0) + (effectiveConfig.statDeltas.cleanliness || 0), 100),
+                health: Math.min((pet.health || 0) + boostedStatDeltas.health, 100),
+                mood: Math.min((pet.mood || 0) + boostedStatDeltas.mood, 100),
+                hunger: Math.min((pet.hunger || 0) + boostedStatDeltas.hunger, 100),
+                cleanliness: Math.min((pet.cleanliness || 0) + boostedStatDeltas.cleanliness, 100),
             };
 
             // Calculate XP and apply evolution gate.
@@ -574,7 +1235,8 @@ async function performAction(req, res, next) {
             let requiresEvolutionStone = pet.requires_evolution_stone;
             let evolved = false;
 
-            let xpAwarded = Math.floor(effectiveConfig.xp * xpMultiplier);
+            const baseXp = Math.floor(effectiveConfig.xp * xpMultiplier);
+            let xpAwarded = baseXp + safeInt(skillOutcome.bonusXp, 0);
             const nextThreshold = oldLevel < LEVEL_THRESHOLDS.length
                 ? LEVEL_THRESHOLDS[oldLevel]
                 : null;
@@ -626,18 +1288,31 @@ async function performAction(req, res, next) {
                      user1_interactions = user1_interactions + $9,
                      user2_interactions = user2_interactions + $10,
                      ${lastAtColumn} = NOW(),
-                     last_decay_at = NOW()
+                     last_decay_at = NOW(),
+                     personality_skill_last_triggered_at = CASE
+                         WHEN $11 THEN NOW()
+                         ELSE personality_skill_last_triggered_at
+                     END
                  WHERE couple_room_id = $1
                  RETURNING *`,
                 [roomId, newStats.health, newStats.mood, newStats.hunger, newStats.cleanliness,
-                    finalTotalXp, newLevel, requiresEvolutionStone, incA, incB]
+                    finalTotalXp, newLevel, requiresEvolutionStone, incA, incB, skillOutcome.triggered]
             );
             pet = updated.rows[0];
 
             // 9. Log the action
             const statChanges = {};
-            for (const [stat, delta] of Object.entries(effectiveConfig.statDeltas)) {
+            for (const [stat, delta] of Object.entries(boostedStatDeltas)) {
                 statChanges[stat] = `+${delta}`;
+            }
+            if (skillOutcome.triggered) {
+                statChanges.personalitySkill = {
+                    id: skillOutcome.skillId,
+                    name: skillOutcome.skillName,
+                    bonusStats: skillOutcome.bonusStats,
+                    bonusXp: skillOutcome.bonusXp,
+                    bonusCoins: skillOutcome.bonusCoins,
+                };
             }
 
             await client.query(
@@ -741,11 +1416,10 @@ async function performAction(req, res, next) {
                 }
             }
 
-            const partnerId = await getPartnerId(roomId, userId, client);
             const partnerToday = partnerId ? await countTodayActions(roomId, partnerId, client) : 0;
 
             // 11. Award Love Coins for pet care
-            let coinsEarned = PET_CARE_COIN_REWARD;
+            let coinsEarned = PET_CARE_COIN_REWARD + safeInt(skillOutcome.bonusCoins, 0);
 
             // First-care-of-the-day bonus
             if (firstCareBonusAwarded) {
@@ -775,11 +1449,13 @@ async function performAction(req, res, next) {
                 cooperativeBonus,
                 consumedItemId,
                 coinsEarned,
+                partnerId,
+                skillOutcome,
             };
         });
 
         const { pet, xpAwarded, evolved, oldLevel, newLevel,
-            myActionsToday, partnerActionsToday, cooperativeBonus, consumedItemId } = result;
+            myActionsToday, partnerActionsToday, cooperativeBonus, consumedItemId, partnerId, skillOutcome } = result;
 
         // Fetch currency and inventory again to reflect consumption
         const roomData = await query('SELECT love_coins FROM couple_rooms WHERE id = $1', [roomId]);
@@ -788,7 +1464,22 @@ async function performAction(req, res, next) {
         const invData = await query('SELECT item_id, quantity FROM pet_inventory WHERE couple_room_id = $1', [roomId]);
         const inventory = invData.rows.map(r => ({ id: r.item_id, qty: r.quantity }));
 
-        const responseData = formatPetResponse(pet, myActionsToday, partnerActionsToday, loveCoins, inventory);
+        const personality = await getPetPersonalitySnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
+
+        const responseData = formatPetResponse(
+            pet,
+            myActionsToday,
+            partnerActionsToday,
+            loveCoins,
+            inventory,
+            null,
+            personality
+        );
 
         // Emit socket events
         const io = getIO();
@@ -800,16 +1491,35 @@ async function performAction(req, res, next) {
                 xpDelta: xpAwarded,
                 byUserId: userId,
                 consumedItemId,
+                skillTriggered: skillOutcome?.triggered === true,
+                skillName: skillOutcome?.skillName || null,
+                skillBonuses: {
+                    stats: skillOutcome?.bonusStats || {},
+                    xp: skillOutcome?.bonusXp || 0,
+                    coins: skillOutcome?.bonusCoins || 0,
+                },
             });
 
+            if (skillOutcome?.triggered) {
+                io.to(`room:${roomId}`).emit('pet:skill_triggered', {
+                    byUserId: userId,
+                    byDisplayName: req.dbUser.display_name,
+                    skillId: skillOutcome.skillId,
+                    skillName: skillOutcome.skillName,
+                    message: skillOutcome.message,
+                    action,
+                });
+            }
+
             // Notify partner specifically
-            const partnerId = await getPartnerId(roomId, userId);
             if (partnerId) {
                 io.to(`user:${partnerId}`).emit('pet:partner_care', {
                     partnerName: req.dbUser.display_name,
                     action,
                     xpDelta: xpAwarded,
                     cooperativeBonus,
+                    skillTriggered: skillOutcome?.triggered === true,
+                    skillName: skillOutcome?.skillName || null,
                 });
             }
 
@@ -837,6 +1547,12 @@ async function performAction(req, res, next) {
                 cooperativeBonus,
                 consumedItemId,
                 coinsEarned: result.coinsEarned || 0,
+                skillTriggered: skillOutcome?.triggered === true,
+                skillId: skillOutcome?.skillId || null,
+                skillName: skillOutcome?.skillName || null,
+                skillBonusStats: skillOutcome?.bonusStats || {},
+                skillBonusXp: skillOutcome?.bonusXp || 0,
+                skillBonusCoins: skillOutcome?.bonusCoins || 0,
             },
         });
     } catch (err) {
@@ -958,13 +1674,21 @@ async function evolvePet(req, res, next) {
         const partnerId = await getPartnerId(roomId, userId);
         const myActionsToday = await countTodayActions(roomId, userId);
         const partnerActionsToday = partnerId ? await countTodayActions(roomId, partnerId) : 0;
+        const personality = await getPetPersonalitySnapshot(roomId, userId, null, {
+            pet: result.pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
 
         const responseData = formatPetResponse(
             result.pet,
             myActionsToday,
             partnerActionsToday,
             result.loveCoins,
-            result.inventory
+            result.inventory,
+            null,
+            personality
         );
 
         const io = getIO();
@@ -1111,14 +1835,6 @@ async function buyShopItem(req, res, next) {
         const { itemId, quantity } = req.body;
         const qty = parseInt(quantity) || 1;
 
-        const SHOP_PRICES = {
-            basic_food: 10,
-            basic_soap: 15,
-            basic_toy: 15,
-            premium_food: 30,
-            evolution_stone: 500, // Very expensive
-        };
-
         const pricePerUnit = SHOP_PRICES[itemId];
         if (!pricePerUnit) {
             return res.status(400).json({ error: 'Mặt hàng không tồn tại trong Cửa Hàng' });
@@ -1196,10 +1912,10 @@ async function buyShopItem(req, res, next) {
 // ═══════════════════════════════════════════════════════════════
 
 const EXPEDITION_TYPES = {
-    forest:   { label: 'Rừng Thần Tiên',   emoji: '🌲', minLevel: 1 },
-    beach:    { label: 'Bãi Biển Tình Yêu', emoji: '🏖️', minLevel: 2 },
-    mountain: { label: 'Đỉnh Núi Mây',     emoji: '⛰️', minLevel: 4 },
-    cave:     { label: 'Hang Đá Bí Ẩn',    emoji: '🕳️', minLevel: 6 },
+    forest: { label: 'Rừng Thần Tiên', emoji: '🌲', minLevel: 1 },
+    beach: { label: 'Bãi Biển Tình Yêu', emoji: '🏖️', minLevel: 2 },
+    mountain: { label: 'Đỉnh Núi Mây', emoji: '⛰️', minLevel: 4 },
+    cave: { label: 'Hang Đá Bí Ẩn', emoji: '🕳️', minLevel: 6 },
 };
 
 const EXPEDITION_DURATIONS = [4, 6, 8]; // hours
@@ -1207,24 +1923,24 @@ const EXPEDITION_DURATIONS = [4, 6, 8]; // hours
 // Loot tables per expedition type + duration tier
 const EXPEDITION_LOOT_TABLE = {
     forest: {
-        common:   [{ type: 'coins', amount: 8 }, { type: 'coins', amount: 12 }, { type: 'item', itemId: 'basic_food', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 20 }, { type: 'item', itemId: 'basic_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
-        rare:     [{ type: 'coins', amount: 35 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
+        common: [{ type: 'coins', amount: 12 }, { type: 'coins', amount: 16 }, { type: 'item', itemId: 'basic_food', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 26 }, { type: 'item', itemId: 'basic_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
+        rare: [{ type: 'coins', amount: 42 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
     },
     beach: {
-        common:   [{ type: 'coins', amount: 12 }, { type: 'item', itemId: 'basic_soap', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 25 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_food', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 50 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
+        common: [{ type: 'coins', amount: 16 }, { type: 'item', itemId: 'basic_soap', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 32 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_food', qty: 2 }],
+        rare: [{ type: 'coins', amount: 60 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
     },
     mountain: {
-        common:   [{ type: 'coins', amount: 18 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 35 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 70 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }],
+        common: [{ type: 'coins', amount: 24 }, { type: 'item', itemId: 'basic_toy', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 44 }, { type: 'item', itemId: 'premium_food', qty: 1 }, { type: 'item', itemId: 'basic_soap', qty: 2 }],
+        rare: [{ type: 'coins', amount: 85 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }],
     },
     cave: {
-        common:   [{ type: 'coins', amount: 25 }, { type: 'item', itemId: 'premium_food', qty: 1 }],
-        uncommon: [{ type: 'coins', amount: 50 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
-        rare:     [{ type: 'coins', amount: 100 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }, { type: 'item', itemId: 'premium_food', qty: 3 }],
+        common: [{ type: 'coins', amount: 34 }, { type: 'item', itemId: 'premium_food', qty: 1 }],
+        uncommon: [{ type: 'coins', amount: 64 }, { type: 'item', itemId: 'premium_food', qty: 2 }, { type: 'item', itemId: 'basic_toy', qty: 2 }],
+        rare: [{ type: 'coins', amount: 120 }, { type: 'item', itemId: 'evolution_stone', qty: 1 }, { type: 'item', itemId: 'premium_food', qty: 3 }],
     },
 };
 
@@ -1266,54 +1982,96 @@ async function startExpedition(req, res, next) {
 
         const expType = EXPEDITION_TYPES[type] ? type : 'forest';
         const expDuration = EXPEDITION_DURATIONS.includes(parseInt(duration)) ? parseInt(duration) : 4;
-
-        // Check if already on expedition
-        const active = await query(
-            `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'exploring'`,
-            [roomId]
-        );
-        if (active.rows.length > 0) {
-            return res.status(400).json({ error: 'Pet đang đi viễn chinh rồi! Đợi pet về nhé.' });
-        }
-
-        // Check for uncollected expedition
-        const uncollected = await query(
-            `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'returned'`,
-            [roomId]
-        );
-        if (uncollected.rows.length > 0) {
-            return res.status(400).json({ error: 'Pet đã về nhưng chưa nhận thưởng! Hãy thu thập loot trước.' });
-        }
-
-        // Check pet health requirements
-        const pet = await ensurePet(roomId);
-        if (pet.health < 30) {
-            return res.status(400).json({ error: 'Pet quá yếu để đi viễn chinh. Cần sức khỏe ≥ 30.' });
-        }
-        if (pet.hunger < 20) {
-            return res.status(400).json({ error: 'Pet quá đói để đi viễn chinh. Cần no bụng ≥ 20.' });
-        }
-
-        // Check level requirement for expedition type
         const typeConfig = EXPEDITION_TYPES[expType];
-        if (pet.evolution_level < typeConfig.minLevel) {
-            return res.status(400).json({
-                error: `${typeConfig.label} yêu cầu pet Lv.${typeConfig.minLevel}+. Pet hiện tại Lv.${pet.evolution_level}.`
-            });
-        }
 
-        // Roll loot ahead of time (stored encrypted, revealed on collect)
-        const loot = rollLoot(expType, expDuration, pet.evolution_level);
-        const endsAt = new Date(Date.now() + expDuration * 60 * 60 * 1000);
+        const result = await transaction(async (client) => {
+            // Serialize expedition start per room to avoid duplicate exploring rows.
+            await client.query('SELECT id FROM couple_rooms WHERE id = $1 FOR UPDATE', [roomId]);
 
-        const result = await query(
-            `INSERT INTO pet_expeditions (couple_room_id, expedition_type, duration_hours, loot_data, ends_at, started_by)
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-             RETURNING *`,
-            [roomId, expType, expDuration, JSON.stringify(loot), endsAt.toISOString(), userId]
-        );
+            // Promote expired expeditions to returned before checks.
+            await client.query(
+                `UPDATE pet_expeditions
+                 SET status = 'returned'
+                 WHERE couple_room_id = $1 AND status = 'exploring' AND ends_at <= NOW()`,
+                [roomId]
+            );
 
-        const expedition = result.rows[0];
+            // Check if already on expedition
+            const active = await client.query(
+                `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'exploring'`,
+                [roomId]
+            );
+            if (active.rows.length > 0) {
+                const err = new Error('Pet đang đi viễn chinh rồi! Đợi pet về nhé.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Check for uncollected expedition
+            const uncollected = await client.query(
+                `SELECT id FROM pet_expeditions WHERE couple_room_id = $1 AND status = 'returned'`,
+                [roomId]
+            );
+            if (uncollected.rows.length > 0) {
+                const err = new Error('Pet đã về nhưng chưa nhận thưởng! Hãy thu thập loot trước.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Check pet health requirements after syncing pending decay.
+            let pet = await ensurePet(roomId, client);
+            const decay = computeDecay(pet);
+            if (decay.decayApplied) {
+                const decayed = await client.query(
+                    `UPDATE couple_pet
+                     SET health = $2, mood = $3, hunger = $4, cleanliness = $5,
+                         last_decay_at = NOW()
+                     WHERE couple_room_id = $1
+                     RETURNING *`,
+                    [roomId, decay.health, decay.mood, decay.hunger, decay.cleanliness]
+                );
+                pet = decayed.rows[0] || pet;
+            }
+
+            if (pet.health < 30) {
+                const err = new Error('Pet quá yếu để đi viễn chinh. Cần sức khỏe ≥ 30.');
+                err.statusCode = 400;
+                throw err;
+            }
+            if (pet.hunger < 20) {
+                const err = new Error('Pet quá đói để đi viễn chinh. Cần no bụng ≥ 20.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Check level requirement for expedition type
+            if (pet.evolution_level < typeConfig.minLevel) {
+                const err = new Error(
+                    `${typeConfig.label} yêu cầu pet Lv.${typeConfig.minLevel}+. Pet hiện tại Lv.${pet.evolution_level}.`
+                );
+                err.statusCode = 400;
+                throw err;
+            }
+
+            // Roll loot ahead of time (stored encrypted, revealed on collect)
+            const loot = rollLoot(expType, expDuration, pet.evolution_level);
+            const endsAt = new Date(Date.now() + expDuration * 60 * 60 * 1000);
+
+            const created = await client.query(
+                `INSERT INTO pet_expeditions (couple_room_id, expedition_type, duration_hours, loot_data, ends_at, started_by)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+                 RETURNING *`,
+                [roomId, expType, expDuration, JSON.stringify(loot), endsAt.toISOString(), userId]
+            );
+
+            return {
+                expedition: created.rows[0],
+                petName: pet.pet_name,
+                endsAt: endsAt.toISOString(),
+            };
+        });
+
+        const expedition = result.expedition;
 
         // Emit socket event
         const io = getIO();
@@ -1324,7 +2082,7 @@ async function startExpedition(req, res, next) {
                 typeLabel: typeConfig.label,
                 typeEmoji: typeConfig.emoji,
                 duration: expDuration,
-                endsAt: endsAt.toISOString(),
+                endsAt: result.endsAt,
                 startedBy: req.dbUser.display_name,
             });
         }
@@ -1340,11 +2098,14 @@ async function startExpedition(req, res, next) {
                 typeEmoji: typeConfig.emoji,
                 duration: expDuration,
                 startedAt: expedition.started_at,
-                endsAt: endsAt.toISOString(),
+                endsAt: result.endsAt,
             },
-            message: `${pet.pet_name} đã lên đường viễn chinh ${typeConfig.emoji} ${typeConfig.label}!`,
+            message: `${result.petName} đã lên đường viễn chinh ${typeConfig.emoji} ${typeConfig.label}!`,
         });
     } catch (err) {
+        if (err.statusCode) {
+            return res.status(err.statusCode).json({ error: err.message });
+        }
         next(err);
     }
 }
@@ -1519,22 +2280,169 @@ async function collectExpeditionLoot(req, res, next) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  Daily Quests
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/couple/pet/daily-quests — Daily quest snapshot + claim state
+ */
+async function getDailyQuests(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const snapshot = await getDailyQuestSnapshot(roomId, userId);
+        return res.json({ data: snapshot });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * POST /api/couple/pet/daily-quests/claim — Claim daily quest reward
+ */
+async function claimDailyQuestReward(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+
+        const result = await transaction(async (client) => {
+            const snapshot = await getDailyQuestSnapshot(roomId, userId, client);
+
+            if (snapshot.claimed) {
+                const err = new Error('Bạn đã nhận thưởng nhiệm vụ hôm nay rồi. Mai quay lại nhé!');
+                err.statusCode = 409;
+                throw err;
+            }
+
+            if (!snapshot.canClaim) {
+                const err = new Error('Chưa hoàn thành đủ nhiệm vụ ngày để nhận thưởng.');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            const claimRes = await client.query(
+                `INSERT INTO coin_reward_logs (couple_room_id, reward_type, reward_key, coins_awarded, awarded_by, metadata)
+                 VALUES ($1, 'pet_daily_quest', $2, $3, $4, $5::jsonb)
+                 ON CONFLICT (couple_room_id, reward_type, reward_key) DO NOTHING
+                 RETURNING id`,
+                [
+                    roomId,
+                    snapshot.rewardKey,
+                    snapshot.rewardCoins,
+                    userId,
+                    JSON.stringify({
+                        source: 'pet_daily_quest',
+                        completedCount: snapshot.completedCount,
+                        totalCount: snapshot.totalCount,
+                    }),
+                ]
+            );
+
+            if (!claimRes.rows.length) {
+                const err = new Error('Phần thưởng hôm nay đã được nhận trước đó rồi.');
+                err.statusCode = 409;
+                throw err;
+            }
+
+            await client.query(
+                `UPDATE couple_rooms
+                 SET love_coins = love_coins + $2
+                 WHERE id = $1`,
+                [roomId, snapshot.rewardCoins]
+            );
+
+            const coinsRes = await client.query(
+                'SELECT love_coins FROM couple_rooms WHERE id = $1',
+                [roomId]
+            );
+
+            const updatedSnapshot = {
+                ...snapshot,
+                claimed: true,
+                canClaim: false,
+            };
+
+            return {
+                coinsAwarded: snapshot.rewardCoins,
+                rewardKey: snapshot.rewardKey,
+                loveCoins: coinsRes.rows[0]?.love_coins || 0,
+                dailyQuest: updatedSnapshot,
+            };
+        });
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('pet:daily_quest_claimed', {
+                byUserId: userId,
+                byDisplayName: req.dbUser.display_name,
+                coinsAwarded: result.coinsAwarded,
+                loveCoins: result.loveCoins,
+                rewardKey: result.rewardKey,
+                dailyQuest: result.dailyQuest,
+                claimedAt: new Date().toISOString(),
+            });
+        }
+
+        return res.json({
+            data: {
+                coinsAwarded: result.coinsAwarded,
+                rewardKey: result.rewardKey,
+                loveCoins: result.loveCoins,
+                dailyQuest: result.dailyQuest,
+            },
+            message: `Nhận thưởng nhiệm vụ ngày thành công +${result.coinsAwarded} Love Coins! 🎯`,
+        });
+    } catch (err) {
+        if (err.statusCode) {
+            return res.status(err.statusCode).json({ error: err.message });
+        }
+        next(err);
+    }
+}
+
+/**
+ * GET /api/couple/pet/personality — Full personality + skill snapshot
+ */
+async function getPetPersonality(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+        const partnerId = await getPartnerId(roomId, userId);
+        const pet = await ensurePet(roomId);
+        const myActionsToday = await countTodayActions(roomId, userId);
+        const partnerActionsToday = partnerId ? await countTodayActions(roomId, partnerId) : 0;
+
+        const snapshot = await getPetPersonalitySnapshot(roomId, userId, null, {
+            pet,
+            partnerId,
+            myActionsToday,
+            partnerActionsToday,
+        });
+
+        return res.json({ data: snapshot });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  Achievement System
 // ═══════════════════════════════════════════════════════════════
 
 const ACHIEVEMENT_DEFINITIONS = [
-    { id: 'first_care',       label: '🥚 Người Mới',             description: 'Chăm sóc pet lần đầu tiên',           target: 1,    coins: 10 },
-    { id: 'caretaker_50',     label: '🍼 Bảo Mẫu Siêng Năng',   description: 'Chăm sóc pet 50 lần',                  target: 50,   coins: 50 },
-    { id: 'caretaker_200',    label: '👨‍⚕️ Bác Sĩ Thú Y',         description: 'Chăm sóc pet 200 lần',                 target: 200,  coins: 150 },
-    { id: 'first_evolution',  label: '💎 Tiến Hóa Lần Đầu',     description: 'Tiến hóa pet lần đầu tiên',            target: 1,    coins: 30 },
-    { id: 'max_evolution',    label: '🌟 Hình Thái Cuối Cùng',   description: 'Pet đạt cấp tiến hóa tối đa (Lv.8)',   target: 8,    coins: 500 },
-    { id: 'explorer_10',     label: '🏔️ Nhà Thám Hiểm',         description: 'Hoàn thành 10 cuộc viễn chinh',        target: 10,   coins: 80 },
-    { id: 'explorer_50',     label: '🗺️ Phượt Thủ Chuyên Nghiệp', description: 'Hoàn thành 50 cuộc viễn chinh',      target: 50,   coins: 300 },
-    { id: 'rich_1000',       label: '💰 Đại Gia',                description: 'Sở hữu 1000 Love Coins cùng lúc',       target: 1000, coins: 100 },
-    { id: 'balance_7',       label: '⚖️ Cân Bằng Hoàn Hảo',     description: 'Giữ Yin-Yang balance 7 ngày liên tiếp', target: 7,    coins: 120 },
-    { id: 'pet_age_30',      label: '🎂 1 Tháng Bên Nhau',      description: 'Nuôi pet đạt 30 ngày tuổi',            target: 30,   coins: 60  },
-    { id: 'pet_age_100',     label: '💝 100 Ngày Yêu Thương',   description: 'Nuôi pet đạt 100 ngày tuổi',           target: 100,  coins: 200 },
-    { id: 'shopper_20',      label: '🛍️ Tín Đồ Mua Sắm',       description: 'Mua 20 vật phẩm từ cửa hàng',          target: 20,   coins: 40  },
+    { id: 'first_care', label: '🥚 Người Mới', description: 'Chăm sóc pet lần đầu tiên', target: 1, coins: 10 },
+    { id: 'caretaker_50', label: '🍼 Bảo Mẫu Siêng Năng', description: 'Chăm sóc pet 50 lần', target: 50, coins: 50 },
+    { id: 'caretaker_200', label: '👨‍⚕️ Bác Sĩ Thú Y', description: 'Chăm sóc pet 200 lần', target: 200, coins: 150 },
+    { id: 'first_evolution', label: '💎 Tiến Hóa Lần Đầu', description: 'Tiến hóa pet lần đầu tiên', target: 1, coins: 30 },
+    { id: 'max_evolution', label: '🌟 Hình Thái Cuối Cùng', description: 'Pet đạt cấp tiến hóa tối đa (Lv.8)', target: 8, coins: 500 },
+    { id: 'explorer_10', label: '🏔️ Nhà Thám Hiểm', description: 'Hoàn thành 10 cuộc viễn chinh', target: 10, coins: 80 },
+    { id: 'explorer_50', label: '🗺️ Phượt Thủ Chuyên Nghiệp', description: 'Hoàn thành 50 cuộc viễn chinh', target: 50, coins: 300 },
+    { id: 'rich_1000', label: '💰 Đại Gia', description: 'Sở hữu 1000 Love Coins cùng lúc', target: 1000, coins: 100 },
+    { id: 'balance_7', label: '⚖️ Cân Bằng Hoàn Hảo', description: 'Giữ Yin-Yang balance 7 ngày liên tiếp', target: 7, coins: 120 },
+    { id: 'pet_age_30', label: '🎂 1 Tháng Bên Nhau', description: 'Nuôi pet đạt 30 ngày tuổi', target: 30, coins: 60 },
+    { id: 'pet_age_100', label: '💝 100 Ngày Yêu Thương', description: 'Nuôi pet đạt 100 ngày tuổi', target: 100, coins: 200 },
+    { id: 'shopper_20', label: '🛍️ Tín Đồ Mua Sắm', description: 'Mua 20 vật phẩm từ cửa hàng', target: 20, coins: 40 },
 ];
 
 /**
@@ -1574,18 +2482,18 @@ async function checkAndUpdateAchievements(coupleRoomId) {
 
         // Calculate progress for each achievement
         const progressMap = {
-            first_care:      totalCareActions,
-            caretaker_50:    totalCareActions,
-            caretaker_200:   totalCareActions,
+            first_care: totalCareActions,
+            caretaker_50: totalCareActions,
+            caretaker_200: totalCareActions,
             first_evolution: Math.max(pet.evolution_level - 1, 0),
-            max_evolution:   pet.evolution_level,
-            explorer_10:     totalExpeditions,
-            explorer_50:     totalExpeditions,
-            rich_1000:       currentCoins,
-            balance_7:       balancedStreak,
-            pet_age_30:      petAge,
-            pet_age_100:     petAge,
-            shopper_20:      totalPurchases,
+            max_evolution: pet.evolution_level,
+            explorer_10: totalExpeditions,
+            explorer_50: totalExpeditions,
+            rich_1000: currentCoins,
+            balance_7: balancedStreak,
+            pet_age_30: petAge,
+            pet_age_100: petAge,
+            shopper_20: totalPurchases,
         };
 
         const newlyUnlocked = [];
@@ -1706,8 +2614,8 @@ async function getAchievements(req, res, next) {
 //  Daily Login Reward
 // ═══════════════════════════════════════════════════════════════
 
-const DAILY_REWARD_SCHEDULE = [5, 8, 12, 15, 18, 22, 30]; // Day 1-7 coin rewards
-const DAILY_REWARD_WEEKLY_BONUS = 30; // Bonus on day 7
+const DAILY_REWARD_SCHEDULE = [8, 10, 12, 15, 18, 22, 28]; // Day 1-7 coin rewards
+const DAILY_REWARD_WEEKLY_BONUS = 25; // Bonus on each 7-day milestone
 
 /**
  * Check and award daily login reward. Called from getPetState.
@@ -1793,6 +2701,13 @@ module.exports = {
     startExpedition,
     getExpeditionStatus,
     collectExpeditionLoot,
+    // Daily quests
+    getDailyQuests,
+    claimDailyQuestReward,
+    getDailyQuestSnapshot,
+    // Personality
+    getPetPersonality,
+    getPetPersonalitySnapshot,
     // Achievements
     getAchievements,
     checkAndUpdateAchievements,
@@ -1811,5 +2726,7 @@ module.exports = {
     DECAY_INTERVAL_HOURS,
     DECAY_PER_INTERVAL,
     EXPEDITION_TYPES,
+    PET_DAILY_QUEST_DEFINITIONS,
+    PET_PERSONALITY_DEFINITIONS,
     ACHIEVEMENT_DEFINITIONS,
 };
