@@ -86,76 +86,11 @@ async function create(req, res, next) {
         if (io) {
             io.to(`room:${roomId}`).except(`user:${userId}`).emit('food:sync', {
                 action: 'create',
-                item,
+                item: result.rows[0],
             });
         }
 
-        res.status(201).json(item);
-    } catch (err) {
-        next(err);
-    }
-}
-
-// POST /api/food/pack - Batch import mood food pack with deduplication
-async function importPack(req, res, next) {
-    try {
-        const { id: roomId } = req.coupleRoom;
-        const userId = req.dbUser.id;
-        const { items } = req.body;
-
-        if (!Array.isArray(items) || items.length === 0) {
-            return res.status(400).json({ error: 'Danh sách món ăn không hợp lệ' });
-        }
-
-        const createdItems = [];
-        await transaction(async (client) => {
-            for (const item of items) {
-                const itemName = item.name?.trim() || 'Món ngon';
-
-                // Check if already in menu
-                const existing = await client.query(
-                    `SELECT id FROM food_items
-                     WHERE couple_room_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2)) AND is_deleted = FALSE
-                     LIMIT 1`,
-                    [roomId, itemName]
-                );
-
-                if (existing.rows.length > 0) {
-                    continue; // Skip duplicate
-                }
-
-                const id = uuidv4();
-                const res = await client.query(
-                    `INSERT INTO food_items (id, couple_room_id, added_by, name, emoji, location, category, notes, is_favorite, eat_count)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)
-                     RETURNING *`,
-                    [
-                        id,
-                        roomId,
-                        userId,
-                        itemName,
-                        item.emoji || '🍜',
-                        item.location?.trim() || null,
-                        item.category?.trim() || 'Món chính',
-                        item.notes?.trim() || null,
-                        Boolean(item.is_favorite),
-                    ]
-                );
-                createdItems.push(res.rows[0]);
-            }
-        });
-
-        const io = getIO();
-        if (io && createdItems.length > 0) {
-            for (const item of createdItems) {
-                io.to(`room:${roomId}`).except(`user:${userId}`).emit('food:sync', {
-                    action: 'create',
-                    item,
-                });
-            }
-        }
-
-        res.status(201).json({ success: true, count: createdItems.length, items: createdItems });
+        res.status(201).json(result.rows[0]);
     } catch (err) {
         next(err);
     }
