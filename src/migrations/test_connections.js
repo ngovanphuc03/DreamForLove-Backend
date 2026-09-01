@@ -1,10 +1,22 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-const OLD_URL = 'postgresql://neondb_owner:npg_LetP70xIgCFN@ep-proud-math-a1enzlv5-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require';
-const NEW_URL = 'postgres://avnadmin:AVNS_Uc0K16wXudeHmyj_hcs@dreamforlove-db-st-1331.b.aivencloud.com:18110/defaultdb?sslmode=require&uselibpqcompat=true';
+const OLD_URL =
+    process.env.MIGRATION_SOURCE_DATABASE_URL
+    || process.env.SOURCE_DATABASE_URL
+    || process.env.OLD_DATABASE_URL;
+
+const NEW_URL =
+    process.env.MIGRATION_TARGET_DATABASE_URL
+    || process.env.AIVEN_DATABASE_URL
+    || process.env.DATABASE_URL;
+
+if (!OLD_URL || !NEW_URL) {
+    throw new Error('Missing OLD_URL/NEW_URL. Set MIGRATION_SOURCE_DATABASE_URL and DATABASE_URL (or MIGRATION_TARGET_DATABASE_URL).');
+}
 
 const outFile = path.join(__dirname, 'test_result.json');
 

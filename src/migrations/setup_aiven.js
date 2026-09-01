@@ -4,8 +4,16 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 
-// Override DATABASE_URL to point to Aiven
-process.env.DATABASE_URL = 'postgres://avnadmin:AVNS_Uc0K16wXudeHmyj_hcs@dreamforlove-db-st-1331.b.aivencloud.com:18110/defaultdb?sslmode=require&uselibpqcompat=true';
+const targetUrl =
+    process.env.MIGRATION_TARGET_DATABASE_URL
+    || process.env.AIVEN_DATABASE_URL
+    || process.env.DATABASE_URL;
+
+if (!targetUrl) {
+    throw new Error('Missing target database URL. Set DATABASE_URL or MIGRATION_TARGET_DATABASE_URL.');
+}
+
+process.env.DATABASE_URL = targetUrl;
 
 const fs = require('fs');
 const path = require('path');
