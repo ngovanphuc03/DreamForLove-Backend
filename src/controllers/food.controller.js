@@ -388,6 +388,10 @@ async function spin(req, res, next) {
             whereClause += ` AND fi.category = $${params.length}`;
         }
 
+        const hasFilters = Boolean(
+            (mode && mode !== 'all') || (category && category !== 'Tất cả')
+        );
+
         const eligibleCountResult = await query(
             `SELECT COUNT(*)::int AS total FROM food_items fi ${whereClause}`,
             params
@@ -395,6 +399,10 @@ async function spin(req, res, next) {
 
         const totalEligible = eligibleCountResult.rows[0]?.total || 0;
         if (totalEligible <= 0) {
+            if (!hasFilters) {
+                return res.status(404).json({ error: 'Chưa có món ăn nào. Hãy thêm vào nhé!' });
+            }
+
             // Fallback: pick any non-deleted food item in room
             const fallbackCount = await query(
                 'SELECT COUNT(*)::int AS total FROM food_items WHERE couple_room_id = $1 AND is_deleted = FALSE',
@@ -429,6 +437,19 @@ async function spin(req, res, next) {
              LIMIT 1 OFFSET $${listParams.length}`,
             listParams
         );
+
+        if (!result.rows.length) {
+            const fbResult = await query(
+                `SELECT fi.*, u.display_name AS added_by_name
+                 FROM food_items fi
+                 JOIN users u ON fi.added_by = u.id
+                 WHERE fi.couple_room_id = $1 AND fi.is_deleted = FALSE
+                 ORDER BY fi.created_at DESC, fi.id DESC
+                 LIMIT 1`,
+                [roomId]
+            );
+            return res.json({ item: fbResult.rows[0] });
+        }
 
         res.json({ item: result.rows[0] });
     } catch (err) {

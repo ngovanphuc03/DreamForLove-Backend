@@ -1,6 +1,8 @@
 const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
-const { getIO } = require('../socket/socket.handler');
+const { getIO, isUserOnline } = require('../socket/socket.handler');
+const { sendPushNotification } = require('../config/firebase');
+const logger = require('../config/logger');
 const { awardLoveCoins, REWARD_PRESETS } = require('../services/loveCoinReward.service');
 
 // Premium limits removed — all features free for everyone
@@ -82,6 +84,29 @@ async function create(req, res, next) {
             });
         }
 
+        // FCM push khi tạo ước mơ
+        try {
+            const partnerRes = await query(
+                `SELECT u.id, u.fcm_token FROM users u
+                 JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                 WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active' LIMIT 1`,
+                [roomId, userId]
+            );
+            if (partnerRes.rows.length) {
+                const partner = partnerRes.rows[0];
+                if (!isUserOnline(partner.id) && partner.fcm_token) {
+                    const senderName = req.dbUser.display_name || 'Người ấy';
+                    await sendPushNotification(partner.fcm_token, {
+                        title: `✨ ${senderName} thêm ước mơ mới!`,
+                        body: `"${name}" — Vào xem & đánh dấu yêu thích nhé 💕`,
+                        data: { type: 'WISHLIST_CREATED', wishName: String(name || '') },
+                    });
+                }
+            }
+        } catch (fcmErr) {
+            logger.error(`[Wishlist] FCM push error: ${fcmErr.message}`);
+        }
+
         res.status(201).json(result.rows[0]);
     } catch (err) {
         next(err);
@@ -157,6 +182,31 @@ async function markBought(req, res, next) {
                     loveCoins: txResult.rewardResult.loveCoins,
                     inventory: txResult.rewardResult.inventory,
                 });
+            }
+        }
+
+        // FCM push khi đánh dấu đã mua
+        if (desiredBought && resultItem) {
+            try {
+                const partnerRes = await query(
+                    `SELECT u.id, u.fcm_token FROM users u
+                     JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                     WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active' LIMIT 1`,
+                    [roomId, userId]
+                );
+                if (partnerRes.rows.length) {
+                    const partner = partnerRes.rows[0];
+                    if (!isUserOnline(partner.id) && partner.fcm_token) {
+                        const buyerName = req.dbUser.display_name || 'Người ấy';
+                        await sendPushNotification(partner.fcm_token, {
+                            title: `🎁 ${buyerName} đã thực hiện ước mơ!`,
+                            body: `"${resultItem.name}" đã được mua rồi 🎉💕`,
+                            data: { type: 'WISHLIST_BOUGHT', wishName: String(resultItem.name || '') },
+                        });
+                    }
+                }
+            } catch (fcmErr) {
+                logger.error(`[Wishlist] FCM bought push error: ${fcmErr.message}`);
             }
         }
 

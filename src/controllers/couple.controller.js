@@ -46,21 +46,26 @@ function computeLevelProgress(totalXp) {
 async function getMyRoom(req, res, next) {
     try {
         const userResult = await query(
-            'SELECT id, display_name, photo_url FROM users WHERE firebase_uid = $1',
+            `SELECT id, display_name, photo_url, gender, birth_date,
+               CASE 
+                 WHEN birth_date IS NOT NULL 
+                 THEN DATE_PART('year', AGE((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, birth_date))::int 
+                 ELSE NULL 
+               END AS age
+             FROM users WHERE firebase_uid = $1`,
             [req.user.uid]
         );
         if (!userResult.rows.length) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const userId = userResult.rows[0].id;
-        const userDisplayName = userResult.rows[0].display_name;
-        const userPhotoUrl = userResult.rows[0].photo_url;
+        const uRow = userResult.rows[0];
+        const userId = uRow.id;
 
         // Get the couple room
         const roomResult = await query(
             `SELECT cr.*,
-              CURRENT_DATE - cr.start_date AS days_together
+              ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - cr.start_date) AS days_together
        FROM couple_rooms cr
        WHERE (cr.user_a_id = $1 OR cr.user_b_id = $1)
          AND cr.status = 'active'
@@ -80,26 +85,45 @@ async function getMyRoom(req, res, next) {
         // Get partner info
         let partnerName = 'Người ấy 💕';
         let partnerAvatar = null;
+        let partnerGender = null;
+        let partnerBirthDate = null;
+        let partnerAge = null;
         if (partnerId) {
             const partnerResult = await query(
-                'SELECT display_name, photo_url FROM users WHERE id = $1',
+                `SELECT display_name, photo_url, gender, birth_date,
+                   CASE 
+                     WHEN birth_date IS NOT NULL 
+                     THEN DATE_PART('year', AGE((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, birth_date))::int 
+                     ELSE NULL 
+                   END AS age
+                 FROM users WHERE id = $1`,
                 [partnerId]
             );
             if (partnerResult.rows.length) {
-                partnerName = partnerResult.rows[0].display_name || partnerName;
-                partnerAvatar = partnerResult.rows[0].photo_url;
+                const pr = partnerResult.rows[0];
+                partnerName = pr.display_name || partnerName;
+                partnerAvatar = pr.photo_url;
+                partnerGender = pr.gender;
+                partnerBirthDate = pr.birth_date;
+                partnerAge = pr.age;
             }
         }
 
         res.json({
             room: {
                 id: room.id,
-                user_display_name: userDisplayName || 'Bạn',
-                user_avatar: userPhotoUrl,
+                user_display_name: uRow.display_name || 'Bạn',
+                user_avatar: uRow.photo_url,
+                user_gender: uRow.gender,
+                user_birth_date: uRow.birth_date,
+                user_age: uRow.age,
                 start_date: room.start_date,
                 days_together: room.days_together,
                 partner_name: partnerName,
                 partner_avatar: partnerAvatar,
+                partner_gender: partnerGender,
+                partner_birth_date: partnerBirthDate,
+                partner_age: partnerAge,
                 memory_photo_base64: room.memory_photo_url || room.memory_photo_base64 || null,
                 is_active: room.status === 'active',
                 is_premium: room.is_premium || false,
@@ -345,13 +369,13 @@ async function getProgress(req, res, next) {
                 COALESCE(BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid), FALSE) AS partner_done
              FROM mood_logs
              WHERE couple_room_id = $1
-               AND (created_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+               AND (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`,
             [roomId, userId, partnerId || null]
         );
 
         const currentStreakResult = await query(
             `WITH qualified_days AS (
-                SELECT (created_at AT TIME ZONE 'UTC')::date AS day
+                SELECT (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS day
                 FROM mood_logs
                 WHERE couple_room_id = $1
                 GROUP BY 1
@@ -361,10 +385,10 @@ async function getProgress(req, res, next) {
             ranked AS (
                 SELECT
                     day,
-                    (CURRENT_DATE - day) AS day_offset,
+                    ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - day) AS day_offset,
                     ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS rn
                 FROM qualified_days
-                WHERE day <= CURRENT_DATE
+                WHERE day <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
             )
             SELECT COALESCE(COUNT(*), 0)::int AS current_streak
             FROM ranked
@@ -374,7 +398,7 @@ async function getProgress(req, res, next) {
 
         const bestStreakResult = await query(
             `WITH qualified_days AS (
-                SELECT (created_at AT TIME ZONE 'UTC')::date AS day
+                SELECT (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS day
                 FROM mood_logs
                 WHERE couple_room_id = $1
                 GROUP BY 1
@@ -400,7 +424,7 @@ async function getProgress(req, res, next) {
         const qualifiedDaysResult = await query(
             `SELECT COALESCE(COUNT(*), 0)::int AS total_qualified_days
              FROM (
-                SELECT (created_at AT TIME ZONE 'UTC')::date AS day
+                SELECT (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS day
                 FROM mood_logs
                 WHERE couple_room_id = $1
                 GROUP BY 1

@@ -15,7 +15,7 @@ async function getCurrent(req, res, next) {
               id, type, note, user_id, couple_room_id, created_at
        FROM mood_logs
        WHERE couple_room_id = $1
-         AND created_at >= CURRENT_DATE
+         AND created_at >= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
        ORDER BY user_id, created_at DESC`,
             [roomId]
         );
@@ -100,10 +100,10 @@ async function create(req, res, next) {
                     `SELECT
                         COALESCE(BOOL_OR(user_id = $2), FALSE) AS me_done,
                         COALESCE(BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid), FALSE) AS partner_done,
-                        CURRENT_DATE::text AS day_key
+                        (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date::text AS day_key
                      FROM mood_logs
                      WHERE couple_room_id = $1
-                       AND (created_at AT TIME ZONE 'UTC')::date = CURRENT_DATE`,
+                       AND (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`,
                     [roomId, userId, partnerData.id]
                 );
 
@@ -139,13 +139,6 @@ async function create(req, res, next) {
                 'partner_mood_update',
                 entry
             );
-
-            if (rewardResult?.awardedCoins > 0) {
-                io.to(`room:${roomId}`).emit('pet:inventory_update', {
-                    loveCoins: rewardResult.loveCoins,
-                    inventory: rewardResult.inventory,
-                });
-            }
         }
 
         // ── Push notification if partner offline ──────────────

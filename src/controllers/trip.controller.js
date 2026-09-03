@@ -1,6 +1,8 @@
 const { query, transaction } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
-const { getIO } = require('../socket/socket.handler');
+const { getIO, isUserOnline } = require('../socket/socket.handler');
+const { sendPushNotification } = require('../config/firebase');
+const logger = require('../config/logger');
 const { awardLoveCoins, REWARD_PRESETS } = require('../services/loveCoinReward.service');
 
 // GET /api/trips?page=1&limit=20
@@ -71,6 +73,31 @@ async function create(req, res, next) {
                 action: 'create',
                 item: result.rows[0],
             });
+        }
+
+        // FCM push cho đối phương nếu offline
+        try {
+            const partnerRes = await query(
+                `SELECT u.id, u.fcm_token, u.display_name
+                 FROM users u
+                 JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                 WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active'
+                 LIMIT 1`,
+                [roomId, userId]
+            );
+            if (partnerRes.rows.length) {
+                const partner = partnerRes.rows[0];
+                if (!isUserOnline(partner.id) && partner.fcm_token) {
+                    const senderName = req.dbUser.display_name || 'Người ấy';
+                    await sendPushNotification(partner.fcm_token, {
+                        title: `🗺️ ${senderName} lên kèo đi chơi!`,
+                        body: `"${title}" — Vào xem lịch trình nhé 💕`,
+                        data: { type: 'TRIP_CREATED', tripTitle: String(title || '') },
+                    });
+                }
+            }
+        } catch (fcmErr) {
+            logger.error(`[Trip] FCM push error: ${fcmErr.message}`);
         }
 
         res.status(201).json(result.rows[0]);

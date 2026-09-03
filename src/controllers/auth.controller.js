@@ -11,23 +11,35 @@ async function login(req, res, next) {
         const email = req.user.email || null;
         const provider = req.user.firebase?.sign_in_provider || 'google';
 
-        // Allow client to supply display name and photo (non-sensitive)
+        // Allow client to supply display name, photo, gender, birth_date (non-sensitive)
         const body = req.body || {};
         const hasDisplayName = Object.prototype.hasOwnProperty.call(body, 'display_name');
         const hasPhotoUrl = Object.prototype.hasOwnProperty.call(body, 'photo_url');
+        const hasGender = Object.prototype.hasOwnProperty.call(body, 'gender');
+        const hasBirthDate = Object.prototype.hasOwnProperty.call(body, 'birth_date');
+
         const display_name = hasDisplayName ? body.display_name : null;
         const photo_url = hasPhotoUrl ? body.photo_url : null;
+        const gender = hasGender ? (body.gender || null) : null;
+        const birth_date = hasBirthDate && body.birth_date ? body.birth_date : null;
 
         // Upsert user (create or update)
         const result = await query(
-            `INSERT INTO users (id, firebase_uid, email, display_name, photo_url, provider)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (firebase_uid) DO UPDATE SET
-         email        = COALESCE(EXCLUDED.email, users.email),
-                 display_name = CASE WHEN $7 THEN EXCLUDED.display_name ELSE users.display_name END,
-                 photo_url    = CASE WHEN $8 THEN EXCLUDED.photo_url ELSE users.photo_url END,
-         updated_at   = NOW()
-       RETURNING *`,
+            `INSERT INTO users (id, firebase_uid, email, display_name, photo_url, provider, gender, birth_date)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (firebase_uid) DO UPDATE SET
+               email        = COALESCE(EXCLUDED.email, users.email),
+               display_name = CASE WHEN $9 THEN EXCLUDED.display_name ELSE users.display_name END,
+               photo_url    = CASE WHEN $10 THEN EXCLUDED.photo_url ELSE users.photo_url END,
+               gender       = CASE WHEN $11 THEN EXCLUDED.gender ELSE users.gender END,
+               birth_date   = CASE WHEN $12 THEN EXCLUDED.birth_date ELSE users.birth_date END,
+               updated_at   = NOW()
+             RETURNING *,
+               CASE 
+                 WHEN birth_date IS NOT NULL 
+                 THEN DATE_PART('year', AGE((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, birth_date))::int 
+                 ELSE NULL 
+               END AS age`,
             [
                 uuidv4(),
                 firebase_uid,
@@ -35,12 +47,38 @@ async function login(req, res, next) {
                 display_name,
                 photo_url,
                 provider,
+                gender,
+                birth_date,
                 hasDisplayName,
                 hasPhotoUrl,
+                hasGender,
+                hasBirthDate,
             ]
         );
 
-        res.json({ user: result.rows[0] });
+        const user = result.rows[0];
+
+        // Auto-assign female_user_id in couple_period_settings if user marks gender as female
+        if (gender === 'female' && user?.id) {
+            try {
+                const roomRes = await query(
+                    `SELECT id FROM couple_rooms 
+                     WHERE (user_a_id = $1 OR user_b_id = $1) AND status = 'active' LIMIT 1`,
+                    [user.id]
+                );
+                if (roomRes.rows.length) {
+                    await query(
+                        `INSERT INTO couple_period_settings (couple_room_id, female_user_id, updated_at)
+                         VALUES ($1, $2, NOW())
+                         ON CONFLICT (couple_room_id)
+                         DO UPDATE SET female_user_id = $2, updated_at = NOW()`,
+                        [roomRes.rows[0].id, user.id]
+                    );
+                }
+            } catch (_) {}
+        }
+
+        res.json({ user });
     } catch (err) {
         next(err);
     }
@@ -50,7 +88,13 @@ async function login(req, res, next) {
 async function getMe(req, res, next) {
     try {
         const result = await query(
-            'SELECT * FROM users WHERE firebase_uid = $1',
+            `SELECT *,
+               CASE 
+                 WHEN birth_date IS NOT NULL 
+                 THEN DATE_PART('year', AGE((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, birth_date))::int 
+                 ELSE NULL 
+               END AS age
+             FROM users WHERE firebase_uid = $1`,
             [req.user.uid]
         );
 

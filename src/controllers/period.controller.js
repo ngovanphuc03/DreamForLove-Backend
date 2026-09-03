@@ -21,22 +21,90 @@ function calculatePeriodStatus(lastPeriodDateStr, cycleLength = 28, periodDurati
     const diffMs = today.getTime() - lastDate.getTime();
     const daysSinceLast = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-    // Cycle day normalized (1-indexed: day 1 to cycleLength)
-    const normalizedDay = (((daysSinceLast % cycleLength) + cycleLength) % cycleLength) + 1;
-    const daysUntilNext = cycleLength - normalizedDay + 1;
-
-    // Cycles elapsed and next dates
-    const cyclesElapsed = Math.floor(daysSinceLast / cycleLength);
-    const nextPeriodDate = new Date(lastDate.getTime() + (cyclesElapsed + 1) * cycleLength * 86400000);
+    // Handle future date edge-case
+    if (daysSinceLast < 0) {
+        return {
+            configured: true,
+            lastPeriodDate: lastDate.toISOString().split('T')[0],
+            nextPeriodDate: lastDate.toISOString().split('T')[0],
+            ovulationDate: null,
+            cycleLength,
+            periodDuration,
+            currentCycleDay: 1,
+            daysUntilNext: cycleLength,
+            ovulationDay: 14,
+            fertileWindowStart: 11,
+            fertileWindowEnd: 16,
+            phase: 'menstrual',
+            phaseName: 'Pha Hành Kinh',
+            phaseEmoji: '🍓',
+            fertility: 'very_low',
+            fertilityLabel: 'Rất Thấp',
+            estrogenLevel: 'Mức đáy',
+            progesteroneLevel: 'Mức đáy',
+            energyScore: 30,
+            status: 'period',
+            isPeriodToday: true,
+            isPmsToday: false,
+            isOvulationToday: false,
+            title: 'Kỳ Kinh Mới 🍓',
+            advice: 'Nàng vừa cập nhật ngày bắt đầu kỳ mới. Hãy giữ ấm bụng và nghỉ ngơi nhé 💕',
+        };
+    }
 
     // Ovulation is approximately 14 days before the next period starts
     const ovulationDay = Math.max(periodDuration + 2, cycleLength - 14);
     const fertileWindowStart = Math.max(periodDuration + 1, ovulationDay - 3);
     const fertileWindowEnd = Math.min(cycleLength - 3, ovulationDay + 1);
 
-    // Current cycle's ovulation calendar date
-    const currentCycleStart = new Date(lastDate.getTime() + cyclesElapsed * cycleLength * 86400000);
-    const ovulationDate = new Date(currentCycleStart.getTime() + (ovulationDay - 1) * 86400000);
+    // Expected next period date based on first cycle
+    const baseNextPeriodDate = new Date(lastDate.getTime() + cycleLength * 86400000);
+    const baseOvulationDate = new Date(lastDate.getTime() + (ovulationDay - 1) * 86400000);
+
+    // CHECK FOR LATE PERIOD: If daysSinceLast >= cycleLength, the period is expected today or overdue!
+    // Do NOT modulo wrap around to follicular phase!
+    if (daysSinceLast >= cycleLength) {
+        const daysLate = daysSinceLast - cycleLength;
+        const normalizedDay = daysSinceLast + 1;
+        return {
+            configured: true,
+            lastPeriodDate: lastDate.toISOString().split('T')[0],
+            nextPeriodDate: baseNextPeriodDate.toISOString().split('T')[0],
+            ovulationDate: baseOvulationDate.toISOString().split('T')[0],
+            cycleLength,
+            periodDuration,
+            currentCycleDay: normalizedDay,
+            daysUntilNext: 0,
+            ovulationDay,
+            fertileWindowStart,
+            fertileWindowEnd,
+            phase: 'late',
+            phaseName: daysLate === 0 ? 'Dự Kiến Đến Kỳ' : 'Chậm Kinh',
+            phaseEmoji: '⚠️',
+            fertility: 'low',
+            fertilityLabel: 'Thấp',
+            estrogenLevel: 'Biến động',
+            progesteroneLevel: 'Biến động',
+            energyScore: 50,
+            status: 'late',
+            isPeriodToday: false,
+            isPmsToday: false,
+            isOvulationToday: false,
+            daysLate,
+            title: daysLate === 0
+                ? 'Dự Kiến Có Kinh Hôm Nay 🍓'
+                : `Chậm Kinh ${daysLate} Ngày ⚠️`,
+            advice: daysLate === 0
+                ? 'Hôm nay là ngày dự kiến bắt đầu kỳ dâu mới. Nàng hãy giữ ấm bụng, uống nước ấm và chuẩn bị đồ ấm nhé 💕'
+                : `Kỳ dâu đã quá dự kiến ${daysLate} ngày. Nàng hãy nghỉ ngơi nhiều hơn, giữ tinh thần thư giãn, tránh thức khuya và dùng que kiểm tra nếu hai bạn có sinh hoạt thân mật trước đó nhé 💕`,
+        };
+    }
+
+    // Normal Cycle Progression (daysSinceLast < cycleLength)
+    const normalizedDay = daysSinceLast + 1;
+    const daysUntilNext = cycleLength - normalizedDay + 1;
+    const nextPeriodDate = baseNextPeriodDate;
+    const ovulationDate = baseOvulationDate;
 
     // 4 Medical Phases Determination
     let phase = 'luteal';
@@ -178,12 +246,45 @@ async function getPeriodData(req, res) {
 
         const currentUserId = req.dbUser?.id || req.user?.id;
 
-        if (result.rows.length === 0) {
+        // Auto-resolve femaleUserId if not yet set in settings
+        let femaleUserId = result.rows[0]?.female_user_id || null;
+        if (!femaleUserId) {
+            const femaleUserRes = await pool.query(
+                `SELECT u.id FROM users u
+                 JOIN couple_rooms cr ON (u.id = cr.user_a_id OR u.id = cr.user_b_id)
+                 WHERE cr.id = $1 AND u.gender = 'female'
+                 LIMIT 1`,
+                [coupleRoomId]
+            );
+            if (femaleUserRes.rows.length > 0) {
+                femaleUserId = femaleUserRes.rows[0].id;
+                await pool.query(
+                    `INSERT INTO couple_period_settings (couple_room_id, female_user_id, updated_at)
+                     VALUES ($1, $2, NOW())
+                     ON CONFLICT (couple_room_id)
+                     DO UPDATE SET female_user_id = $2, updated_at = NOW()`,
+                    [coupleRoomId, femaleUserId]
+                );
+            }
+        }
+
+        // Determine isCurrentUserFemale based on femaleUserId or user's declared gender
+        let isCurrentUserFemale = null;
+        if (femaleUserId) {
+            isCurrentUserFemale = (femaleUserId === currentUserId);
+        } else {
+            const userGenderRes = await pool.query('SELECT gender FROM users WHERE id = $1', [currentUserId]);
+            if (userGenderRes.rows.length && userGenderRes.rows[0].gender) {
+                isCurrentUserFemale = (userGenderRes.rows[0].gender === 'female');
+            }
+        }
+
+        if (result.rows.length === 0 || !result.rows[0].last_period_date) {
             return res.json({
                 configured: false,
                 message: 'Chưa thiết lập ngày chu kỳ',
-                femaleUserId: null,
-                isCurrentUserFemale: null,
+                femaleUserId,
+                isCurrentUserFemale,
             });
         }
 
@@ -193,9 +294,6 @@ async function getPeriodData(req, res) {
             row.cycle_length,
             row.period_duration
         );
-
-        const femaleUserId = row.female_user_id;
-        const isCurrentUserFemale = femaleUserId ? (femaleUserId === currentUserId) : null;
 
         return res.json({
             ...statusData,
@@ -222,6 +320,23 @@ async function updatePeriodSettings(req, res) {
 
         if (!coupleRoomId) {
             return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
+        }
+
+        // Security check: Only the female user can update period settings
+        const currentSetting = await pool.query(
+            `SELECT female_user_id FROM couple_period_settings WHERE couple_room_id = $1`,
+            [coupleRoomId]
+        );
+        let assignedFemaleId = currentSetting.rows[0]?.female_user_id;
+        if (!assignedFemaleId) {
+            const userRes = await pool.query('SELECT gender FROM users WHERE id = $1', [userId]);
+            if (userRes.rows[0]?.gender === 'female') {
+                assignedFemaleId = userId;
+            } else if (userRes.rows[0]?.gender === 'male') {
+                return res.status(403).json({ error: 'Chỉ bạn nữ mới có quyền cài đặt chu kỳ' });
+            }
+        } else if (assignedFemaleId !== userId) {
+            return res.status(403).json({ error: 'Chỉ bạn nữ mới có quyền cập nhật chu kỳ' });
         }
 
         const { lastPeriodDate, cycleLength = 28, periodDuration = 5, notes, asFemale } = req.body;
@@ -386,8 +501,8 @@ async function setPeriodRole(req, res) {
 
         if (femaleUserId) {
             await pool.query(
-                `INSERT INTO couple_period_settings (couple_room_id, last_period_date, female_user_id, updated_at)
-                 VALUES ($1, CURRENT_DATE, $2, NOW())
+                `INSERT INTO couple_period_settings (couple_room_id, female_user_id, updated_at)
+                 VALUES ($1, $2, NOW())
                  ON CONFLICT (couple_room_id)
                  DO UPDATE SET female_user_id = $2, updated_at = NOW()`,
                 [coupleRoomId, femaleUserId]

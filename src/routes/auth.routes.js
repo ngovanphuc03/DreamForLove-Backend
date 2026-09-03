@@ -16,6 +16,22 @@ router.post(
     [
         body('display_name').optional().isString().trim(),
         body('photo_url').optional().isString(),
+        body('gender').optional().isString().trim(),
+        body('birth_date').optional(),
+    ],
+    validateRequest,
+    authCtrl.login
+);
+
+// PUT /api/auth/profile – update user profile
+router.put(
+    '/profile',
+    verifyAuth,
+    [
+        body('display_name').optional().isString().trim(),
+        body('photo_url').optional().isString(),
+        body('gender').optional().isString().trim(),
+        body('birth_date').optional(),
     ],
     validateRequest,
     authCtrl.login
