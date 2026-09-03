@@ -30,30 +30,32 @@ function startCleanupJob() {
                 logger.info(`[Cron] Purging ${roomIds.length} room(s): ${roomIds.join(', ')}`);
 
                 // 2. Delete child data in dependency order
-                await client.query(
-                    'DELETE FROM mood_logs     WHERE couple_room_id = ANY($1::uuid[])',
-                    [roomIds]
-                );
-                await client.query(
-                    'DELETE FROM wish_items    WHERE couple_room_id = ANY($1::uuid[])',
-                    [roomIds]
-                );
-                await client.query(
-                    'DELETE FROM food_items    WHERE couple_room_id = ANY($1::uuid[])',
-                    [roomIds]
-                );
-                await client.query(
-                    'DELETE FROM pet_care_actions WHERE couple_room_id = ANY($1::uuid[])',
-                    [roomIds]
-                );
-                await client.query(
-                    'DELETE FROM pet_inventory WHERE couple_room_id = ANY($1::uuid[])',
-                    [roomIds]
-                );
-                await client.query(
-                    'DELETE FROM couple_pet    WHERE couple_room_id = ANY($1::uuid[])',
-                    [roomIds]
-                );
+                const childTables = [
+                    'mood_logs',
+                    'wish_items',
+                    'food_history',
+                    'food_items',
+                    'trip_plans',
+                    'milestones',
+                    'couple_period_daily_logs',
+                    'couple_period_cycles',
+                    'couple_period_settings',
+                    'pet_care_actions',
+                    'pet_inventory',
+                    'couple_pet',
+                    'coin_reward_logs',
+                ];
+
+                for (const table of childTables) {
+                    try {
+                        await client.query(
+                            `DELETE FROM ${table} WHERE couple_room_id = ANY($1::uuid[])`,
+                            [roomIds]
+                        );
+                    } catch (tableErr) {
+                        logger.warn(`[Cron] Purge table ${table} warning: ${tableErr.message}`);
+                    }
+                }
 
                 // 3. Delete the rooms themselves
                 const del = await client.query(

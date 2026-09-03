@@ -294,14 +294,19 @@ async function joinWithCode(req, res, next) {
             );
             const room = roomResult.rows[0];
 
-            // Insert default milestones
-            for (const m of DEFAULT_MILESTONES) {
-                await client.query(
-                    `INSERT INTO milestones (id, couple_room_id, label, target_days, emoji)
-           VALUES ($1, $2, $3, $4, $5)`,
-                    [uuidv4(), roomId, m.label, m.days, m.emoji]
-                );
-            }
+            // Insert default milestones (single batch insert)
+            const milestoneValues = [];
+            const milestoneParams = [];
+            DEFAULT_MILESTONES.forEach((m, idx) => {
+                const offset = idx * 5;
+                milestoneValues.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
+                milestoneParams.push(uuidv4(), roomId, m.label, m.days, m.emoji);
+            });
+            await client.query(
+                `INSERT INTO milestones (id, couple_room_id, label, target_days, emoji)
+                 VALUES ${milestoneValues.join(', ')}`,
+                milestoneParams
+            );
 
             // Auto-create couple pet for the new room
             await client.query(
@@ -363,18 +368,16 @@ async function getProgress(req, res, next) {
             ? req.coupleRoom.user_b_id
             : req.coupleRoom.user_a_id;
 
-        const todayStatusResult = await query(
-            `SELECT
-                COALESCE(BOOL_OR(user_id = $2), FALSE) AS me_done,
-                COALESCE(BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid), FALSE) AS partner_done
-             FROM mood_logs
-             WHERE couple_room_id = $1
-               AND (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`,
-            [roomId, userId, partnerId || null]
-        );
-
-        const currentStreakResult = await query(
-            `WITH qualified_days AS (
+        const progressResult = await query(
+            `WITH today_check AS (
+                SELECT
+                    COALESCE(BOOL_OR(user_id = $2), FALSE) AS me_done,
+                    COALESCE(BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid), FALSE) AS partner_done
+                FROM mood_logs
+                WHERE couple_room_id = $1
+                  AND (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+            ),
+            qualified_days AS (
                 SELECT (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS day
                 FROM mood_logs
                 WHERE couple_room_id = $1
@@ -397,58 +400,52 @@ async function getProgress(req, res, next) {
                 CROSS JOIN today_status ts
                 WHERE (ts.today_done OR ts.yesterday_done)
                   AND q.day <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-            )
-            SELECT COALESCE(COUNT(*), 0)::int AS current_streak
-            FROM ranked
-            WHERE day_offset = rn`,
-            [roomId, userId, partnerId || null]
-        );
-
-        const bestStreakResult = await query(
-            `WITH qualified_days AS (
-                SELECT (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS day
-                FROM mood_logs
-                WHERE couple_room_id = $1
-                GROUP BY 1
-                HAVING BOOL_OR(user_id = $2)
-                   AND BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid)
             ),
-            grouped AS (
+            current_streak_calc AS (
+                SELECT COALESCE(COUNT(*), 0)::int AS current_streak
+                FROM ranked
+                WHERE day_offset = rn
+            ),
+            grouped_streaks AS (
                 SELECT
                     day,
                     day - (ROW_NUMBER() OVER (ORDER BY day))::int AS grp
                 FROM qualified_days
             ),
-            streaks AS (
-                SELECT COUNT(*)::int AS len
-                FROM grouped
-                GROUP BY grp
+            best_streak_calc AS (
+                SELECT COALESCE(MAX(len), 0)::int AS best_streak
+                FROM (
+                    SELECT COUNT(*)::int AS len
+                    FROM grouped_streaks
+                    GROUP BY grp
+                ) s
+            ),
+            total_days_calc AS (
+                SELECT COALESCE(COUNT(*), 0)::int AS total_qualified_days
+                FROM qualified_days
             )
-            SELECT COALESCE(MAX(len), 0)::int AS best_streak
-            FROM streaks`,
+            SELECT
+                COALESCE(tc.me_done, FALSE) AS me_done,
+                COALESCE(tc.partner_done, FALSE) AS partner_done,
+                COALESCE(cs.current_streak, 0)::int AS current_streak,
+                COALESCE(bs.best_streak, 0)::int AS best_streak,
+                COALESCE(td.total_qualified_days, 0)::int AS total_qualified_days
+            FROM (SELECT 1) _dummy
+            LEFT JOIN today_check tc ON TRUE
+            LEFT JOIN current_streak_calc cs ON TRUE
+            LEFT JOIN best_streak_calc bs ON TRUE
+            LEFT JOIN total_days_calc td ON TRUE`,
             [roomId, userId, partnerId || null]
         );
 
-        const qualifiedDaysResult = await query(
-            `SELECT COALESCE(COUNT(*), 0)::int AS total_qualified_days
-             FROM (
-                SELECT (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS day
-                FROM mood_logs
-                WHERE couple_room_id = $1
-                GROUP BY 1
-                HAVING BOOL_OR(user_id = $2)
-                   AND BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid)
-             ) q`,
-            [roomId, userId, partnerId || null]
-        );
-
-        const meDone = todayStatusResult.rows[0]?.me_done === true;
-        const partnerDone = todayStatusResult.rows[0]?.partner_done === true;
+        const row = progressResult.rows[0] || {};
+        const meDone = row.me_done === true;
+        const partnerDone = row.partner_done === true;
         const qualifiedToday = meDone && partnerDone;
 
-        const currentStreak = currentStreakResult.rows[0]?.current_streak || 0;
-        const bestStreak = bestStreakResult.rows[0]?.best_streak || 0;
-        const totalQualifiedDays = qualifiedDaysResult.rows[0]?.total_qualified_days || 0;
+        const currentStreak = row.current_streak || 0;
+        const bestStreak = row.best_streak || 0;
+        const totalQualifiedDays = row.total_qualified_days || 0;
 
         const totalXp = totalQualifiedDays * XP_PER_QUALIFIED_DAY;
         const { currentLevel, xpToNextLevel } = computeLevelProgress(totalXp);

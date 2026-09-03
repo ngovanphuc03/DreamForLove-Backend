@@ -49,7 +49,8 @@ async function computeCycleStats(pool, coupleRoomId, baseCycleLength = 28, baseP
                 cycle_length, period_duration, is_predicted, notes, created_at
          FROM couple_period_cycles
          WHERE couple_room_id = $1
-         ORDER BY start_date DESC`,
+         ORDER BY start_date DESC
+         LIMIT 24`,
         [coupleRoomId]
     );
 

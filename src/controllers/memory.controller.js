@@ -1,6 +1,26 @@
 const { query } = require('../config/database');
 const { getIO } = require('../socket/socket.handler');
 const { uploadImage, deleteImage, parseBase64Image } = require('../config/storage');
+const logger = require('../config/logger');
+
+async function deleteOldMemoryPhoto(roomId) {
+    try {
+        const oldRoom = await query(
+            'SELECT memory_photo_key FROM couple_rooms WHERE id = $1',
+            [roomId]
+        );
+        const oldKey = oldRoom.rows[0]?.memory_photo_key;
+        if (oldKey) {
+            try {
+                await deleteImage(oldKey);
+            } catch (e) {
+                logger.warn(`[MemoryPhoto] Failed to delete old image key=${oldKey}: ${e.message}`);
+            }
+        }
+    } catch (err) {
+        logger.warn(`[MemoryPhoto] Error looking up old image key: ${err.message}`);
+    }
+}
 
 // PATCH /api/couple/memory-photo
 async function updateMemoryPhoto(req, res, next) {
@@ -15,38 +35,14 @@ async function updateMemoryPhoto(req, res, next) {
         let photoUrl = null;
         let photoKey = null;
 
-        if (normalized) {
-            // Delete old photo from storage if exists
-            const oldRoom = await query(
-                'SELECT memory_photo_key FROM couple_rooms WHERE id = $1',
-                [roomId]
-            );
-            const oldKey = oldRoom.rows[0]?.memory_photo_key;
-            if (oldKey) {
-                try { await deleteImage(oldKey); } catch (e) {
-                    const logger = require('../config/logger');
-                    logger.warn(`[MemoryPhoto] Failed to delete old image key=${oldKey}: ${e.message}`);
-                }
-            }
+        await deleteOldMemoryPhoto(roomId);
 
+        if (normalized) {
             // Upload new photo to object storage
             const { buffer, mimeType } = parseBase64Image(normalized);
             const uploaded = await uploadImage(buffer, 'memory-photos', mimeType);
             photoUrl = uploaded.url;
             photoKey = uploaded.key;
-        } else {
-            // Clearing photo — delete from storage
-            const oldRoom = await query(
-                'SELECT memory_photo_key FROM couple_rooms WHERE id = $1',
-                [roomId]
-            );
-            const oldKey = oldRoom.rows[0]?.memory_photo_key;
-            if (oldKey) {
-                try { await deleteImage(oldKey); } catch (e) {
-                    const logger = require('../config/logger');
-                    logger.warn(`[MemoryPhoto] Failed to delete image key=${oldKey}: ${e.message}`);
-                }
-            }
         }
 
         const result = await query(

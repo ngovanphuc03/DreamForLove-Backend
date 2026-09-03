@@ -89,7 +89,8 @@ async function create(req, res, next) {
                 const partner = partnerRes.rows[0];
                 if (!isUserOnline(partner.id) && partner.fcm_token) {
                     const senderName = req.dbUser.display_name || 'Người ấy';
-                    await sendPushNotification(partner.fcm_token, {
+                    await sendPushNotification({
+                        token: partner.fcm_token,
                         title: `🗺️ ${senderName} lên kèo đi chơi!`,
                         body: `"${title}" — Vào xem lịch trình nhé 💕`,
                         data: { type: 'TRIP_CREATED', tripTitle: String(title || '') },

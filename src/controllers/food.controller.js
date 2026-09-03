@@ -109,40 +109,64 @@ async function importPack(req, res, next) {
 
         const createdItems = [];
         await transaction(async (client) => {
+            const rawNames = items.map(i => (i.name?.trim() || 'Món ngon')).filter(Boolean);
+            if (!rawNames.length) return;
+
+            // 1 single query to check existing names in the room
+            const existingRes = await client.query(
+                `SELECT LOWER(TRIM(name)) as name_lower FROM food_items
+                 WHERE couple_room_id = $1 AND is_deleted = FALSE AND LOWER(TRIM(name)) = ANY($2::text[])`,
+                [roomId, rawNames.map(n => n.toLowerCase())]
+            );
+            const existingSet = new Set(existingRes.rows.map(r => r.name_lower));
+
+            const seenInBatch = new Set();
+            const toInsert = [];
             for (const item of items) {
                 const itemName = item.name?.trim() || 'Món ngon';
-
-                // Check if already in menu
-                const existing = await client.query(
-                    `SELECT id FROM food_items
-                     WHERE couple_room_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2)) AND is_deleted = FALSE
-                     LIMIT 1`,
-                    [roomId, itemName]
-                );
-
-                if (existing.rows.length > 0) {
-                    continue; // Skip duplicate
+                const lower = itemName.toLowerCase();
+                if (existingSet.has(lower) || seenInBatch.has(lower)) {
+                    continue;
                 }
-
-                const id = uuidv4();
-                const res = await client.query(
-                    `INSERT INTO food_items (id, couple_room_id, added_by, name, emoji, location, category, notes, is_favorite, eat_count)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)
-                     RETURNING *`,
-                    [
-                        id,
-                        roomId,
-                        userId,
-                        itemName,
-                        item.emoji || '🍜',
-                        item.location?.trim() || null,
-                        item.category?.trim() || 'Món chính',
-                        item.notes?.trim() || null,
-                        Boolean(item.is_favorite),
-                    ]
-                );
-                createdItems.push(res.rows[0]);
+                seenInBatch.add(lower);
+                toInsert.push({
+                    name: itemName,
+                    emoji: item.emoji || '🍜',
+                    location: item.location?.trim() || null,
+                    category: item.category?.trim() || 'Món chính',
+                    notes: item.notes?.trim() || null,
+                    is_favorite: Boolean(item.is_favorite),
+                });
             }
+
+            if (!toInsert.length) return;
+
+            // Batch insert all new items in 1 query
+            const valueRows = [];
+            const params = [];
+            toInsert.forEach((item, idx) => {
+                const offset = idx * 9;
+                valueRows.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, 0)`);
+                params.push(
+                    uuidv4(),
+                    roomId,
+                    userId,
+                    item.name,
+                    item.emoji,
+                    item.location,
+                    item.category,
+                    item.notes,
+                    item.is_favorite
+                );
+            });
+
+            const insertRes = await client.query(
+                `INSERT INTO food_items (id, couple_room_id, added_by, name, emoji, location, category, notes, is_favorite, eat_count)
+                 VALUES ${valueRows.join(', ')}
+                 RETURNING *`,
+                params
+            );
+            createdItems.push(...insertRes.rows);
         });
 
         const io = getIO();

@@ -1,6 +1,7 @@
 const { query } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 const { deleteFirebaseUser } = require('../config/firebase');
+const logger = require('../config/logger');
 
 // POST /api/auth/login
 // ⚠️ verifyAuth runs BEFORE this → req.user is guaranteed to have uid/email
@@ -75,7 +76,9 @@ async function login(req, res, next) {
                         [roomRes.rows[0].id, user.id]
                     );
                 }
-            } catch (_) {}
+            } catch (assignErr) {
+                logger.warn(`[Auth] Auto-assign female_user_id warning: ${assignErr.message}`);
+            }
         }
 
         res.json({ user });
@@ -136,7 +139,6 @@ async function deleteAccount(req, res, next) {
             await deleteFirebaseUser(firebaseUid);
         } catch (fbErr) {
             // In dev mode or if Firebase is unavailable, log warn but continue
-            const logger = require('../config/logger');
             logger.warn(`[deleteAccount] Firebase user delete skipped for uid=${firebaseUid}: ${fbErr.message}`);
         }
 
