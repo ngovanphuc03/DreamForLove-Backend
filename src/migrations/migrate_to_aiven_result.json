@@ -1,0 +1,107 @@
+{
+  "startedAt": "2026-05-02T09:48:01.340Z",
+  "source": "postgresql://<hidden>@ep-proud-math-a1enzlv5-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&uselibpqcompat=true",
+  "target": "postgres://<hidden>@dreamforlove-db-st-1331.b.aivencloud.com:18110/defaultdb?sslmode=require&uselibpqcompat=true",
+  "ok": true,
+  "missingOnTarget": [],
+  "verification": [
+    {
+      "tableName": "audit_logs",
+      "sourceCount": 0,
+      "targetCount": 0,
+      "matched": true
+    },
+    {
+      "tableName": "coin_reward_logs",
+      "sourceCount": 34,
+      "targetCount": 34,
+      "matched": true
+    },
+    {
+      "tableName": "couple_pet",
+      "sourceCount": 1,
+      "targetCount": 1,
+      "matched": true
+    },
+    {
+      "tableName": "couple_rooms",
+      "sourceCount": 8,
+      "targetCount": 8,
+      "matched": true
+    },
+    {
+      "tableName": "food_items",
+      "sourceCount": 29,
+      "targetCount": 29,
+      "matched": true
+    },
+    {
+      "tableName": "milestones",
+      "sourceCount": 56,
+      "targetCount": 56,
+      "matched": true
+    },
+    {
+      "tableName": "mood_logs",
+      "sourceCount": 39,
+      "targetCount": 39,
+      "matched": true
+    },
+    {
+      "tableName": "pairing_codes",
+      "sourceCount": 0,
+      "targetCount": 0,
+      "matched": true
+    },
+    {
+      "tableName": "pet_achievements",
+      "sourceCount": 12,
+      "targetCount": 12,
+      "matched": true
+    },
+    {
+      "tableName": "pet_care_actions",
+      "sourceCount": 86,
+      "targetCount": 86,
+      "matched": true
+    },
+    {
+      "tableName": "pet_expeditions",
+      "sourceCount": 10,
+      "targetCount": 10,
+      "matched": true
+    },
+    {
+      "tableName": "pet_inventory",
+      "sourceCount": 26,
+      "targetCount": 26,
+      "matched": true
+    },
+    {
+      "tableName": "schema_migrations",
+      "sourceCount": 0,
+      "targetCount": 0,
+      "matched": true
+    },
+    {
+      "tableName": "trip_plans",
+      "sourceCount": 3,
+      "targetCount": 3,
+      "matched": true
+    },
+    {
+      "tableName": "users",
+      "sourceCount": 10,
+      "targetCount": 10,
+      "matched": true
+    },
+    {
+      "tableName": "wish_items",
+      "sourceCount": 47,
+      "targetCount": 47,
+      "matched": true
+    }
+  ],
+  "notes": [],
+  "finishedAt": "2026-05-02T09:49:50.366Z"
+}

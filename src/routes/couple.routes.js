@@ -79,6 +79,31 @@ router.patch(
     coupleCtrl.updateMemoryPhoto
 );
 
+// PATCH /api/couple/start-date – update anniversary start date
+router.patch(
+    '/start-date',
+    requireCouple,
+    [
+        body('start_date')
+            .notEmpty()
+            .isISO8601()
+            .custom((value) => {
+                const input = new Date(value);
+                const today = new Date();
+                today.setHours(23, 59, 59, 999);
+                if (Number.isNaN(input.getTime())) {
+                    throw new Error('start_date is invalid');
+                }
+                if (input > today) {
+                    throw new Error('start_date cannot be in the future');
+                }
+                return true;
+            }),
+    ],
+    validateRequest,
+    coupleCtrl.updateStartDate
+);
+
 // ── Milestones ──────────────────────────────────────────────────
 router.get('/milestones', requireCouple, coupleCtrl.getMilestones);
 router.post(

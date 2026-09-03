@@ -7,6 +7,7 @@
         "start": "node src/app.js",
         "dev": "nodemon src/app.js",
         "migrate": "node src/migrations/run.js",
+        "migrate:aiven": "node src/migrations/migrate_to_aiven.js",
         "lint": "eslint src/**/*.js",
         "test": "jest --verbose --forceExit --detectOpenHandles",
         "test:ci": "jest --coverage --runInBand"

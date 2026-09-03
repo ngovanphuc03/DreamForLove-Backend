@@ -585,6 +585,47 @@ async function updateMemoryPhoto(req, res, next) {
     }
 }
 
+// ── Update Start Date ────────────────────────────────────────────
+async function updateStartDate(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const { start_date } = req.body;
+
+        const result = await query(
+            `UPDATE couple_rooms
+             SET start_date = $2,
+                 updated_at = NOW()
+             WHERE id = $1 AND status = 'active'
+             RETURNING id, start_date, CURRENT_DATE - start_date AS days_together`,
+            [roomId, start_date]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Couple room not found' });
+        }
+
+        const updated = result.rows[0];
+
+        // Notify partner via socket if connected
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('couple:start-date-updated', {
+                roomId,
+                startDate: updated.start_date,
+                daysTogether: updated.days_together,
+            });
+        }
+
+        res.json({
+            success: true,
+            start_date: updated.start_date,
+            days_together: updated.days_together,
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
 // ── Milestones CRUD ──────────────────────────────────────────────
 async function getMilestones(req, res, next) {
     try {
@@ -656,5 +697,5 @@ module.exports = {
     getMyRoom, generateCode, joinWithCode, disconnect,
     getProgress,
     getMilestones, createMilestone, updateMilestone, deleteMilestone,
-    sendHeartbeat, updateMemoryPhoto,
+    sendHeartbeat, updateMemoryPhoto, updateStartDate,
 };

@@ -160,6 +160,116 @@ function initSocket(io) {
             socket.to(`room:${socket.coupleRoomId}`).emit('food:sync', { action, item });
         });
 
+        // ── Event: food proposal / invitation ────────────────────────────────────
+        socket.on('food:propose', async (payload = {}) => {
+            if (!socket.coupleRoomId) return;
+            const senderName = socket.dbUser.display_name || 'Người ấy';
+            const { foodName, emoji, category, location } = payload;
+
+            // Broadcast to partner in room
+            socket.to(`room:${socket.coupleRoomId}`).emit('food:proposed', {
+                senderId: userId,
+                senderName,
+                foodName: foodName || 'Món ngon',
+                emoji: emoji || '🍲',
+                category: category || '',
+                location: location || '',
+                proposedAt: new Date().toISOString(),
+            });
+
+            // If partner is offline, send FCM push notification
+            try {
+                const partnerRes = await query(
+                    `SELECT u.id, u.fcm_token
+                     FROM users u
+                     JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                     WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [socket.coupleRoomId, userId]
+                );
+                if (partnerRes.rows.length) {
+                    const partner = partnerRes.rows[0];
+                    const partnerOnline = isUserOnline(partner.id);
+                    if (!partnerOnline && partner.fcm_token) {
+                        const title = `${emoji || '🍜'} Kèo ăn uống từ ${senderName}!`;
+                        const body = `${senderName} rủ bạn đi ăn ${foodName || 'món này'}. Vào duyệt liền nhé 💕`;
+                        await sendPushNotification(partner.fcm_token, {
+                            title,
+                            body,
+                            data: {
+                                type: 'FOOD_PROPOSE',
+                                foodName: String(foodName || ''),
+                                emoji: String(emoji || '🍲'),
+                                senderName: String(senderName),
+                            },
+                        });
+                    }
+                }
+            } catch (err) {
+                logger.error(`[Socket] food:propose FCM error: ${err.message}`);
+            }
+        });
+
+        // ── Event: food proposal response ────────────────────────────────────────
+        socket.on('food:response', async (payload = {}) => {
+            if (!socket.coupleRoomId) return;
+            const responderName = socket.dbUser.display_name || 'Người ấy';
+            const { foodName, emoji, accepted } = payload;
+
+            // Broadcast response to room
+            socket.to(`room:${socket.coupleRoomId}`).emit('food:responded', {
+                responderId: userId,
+                responderName,
+                foodName: foodName || 'Món ăn',
+                emoji: emoji || '🍲',
+                accepted: Boolean(accepted),
+                respondedAt: new Date().toISOString(),
+            });
+        });
+
+        // ── Event: period SOS alert ──────────────────────────────────────────────
+        socket.on('period:sos', async (payload = {}) => {
+            if (!socket.coupleRoomId) return;
+            const senderName = socket.dbUser.display_name || 'Bé cưng';
+            const { note = 'Em đau bụng và mệt quá, cần được ôm...', symptom = 'cramps' } = payload;
+
+            socket.to(`room:${socket.coupleRoomId}`).emit('period:sos', {
+                senderId: userId,
+                senderName,
+                symptom,
+                note,
+                sentAt: new Date().toISOString(),
+            });
+
+            try {
+                const partnerRes = await query(
+                    `SELECT u.id, u.fcm_token
+                     FROM users u
+                     JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                     WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [socket.coupleRoomId, userId]
+                );
+                if (partnerRes.rows.length) {
+                    const partner = partnerRes.rows[0];
+                    const partnerOnline = isUserOnline(partner.id);
+                    if (!partnerOnline && partner.fcm_token) {
+                        await sendPushNotification(partner.fcm_token, {
+                            title: `🍓 ${senderName} cần bạn dỗ dành nè!`,
+                            body: note,
+                            data: {
+                                type: 'PERIOD_SOS',
+                                symptom: String(symptom),
+                                senderName: String(senderName),
+                            },
+                        });
+                    }
+                }
+            } catch (err) {
+                logger.error(`[Socket] period:sos FCM error: ${err.message}`);
+            }
+        });
+
         // ── Event: pet care action (socket alternative to REST) ──────────────────
         socket.on('pet:action', async (payload = {}) => {
             const action = payload?.action;

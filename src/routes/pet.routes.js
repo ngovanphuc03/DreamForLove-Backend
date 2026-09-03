@@ -74,11 +74,21 @@ router.get(
 // ── Expedition Routes ───────────────────────────────────────
 router.post('/expedition/start', [
     body('type').isString().withMessage('Loại viễn chinh không hợp lệ'),
-    body('duration').isInt({ min: 4, max: 8 }).withMessage('Thời lượng phải từ 4-8 giờ'),
+    body('duration')
+        .isInt().withMessage('Thời lượng phải là số nguyên')
+        .custom((value) => [4, 6, 8].includes(Number(value)))
+        .withMessage('Thời lượng chỉ hỗ trợ 4, 6 hoặc 8 giờ'),
 ], validateRequest, petCtrl.startExpedition);
 
 router.get('/expedition/status', petCtrl.getExpeditionStatus);
 router.post('/expedition/collect', petCtrl.collectExpeditionLoot);
+
+// ── Daily Quest Routes ───────────────────────────────────────
+router.get('/daily-quests', petCtrl.getDailyQuests);
+router.post('/daily-quests/claim', petCtrl.claimDailyQuestReward);
+
+// ── Personality Routes ───────────────────────────────────────
+router.get('/personality', petCtrl.getPetPersonality);
 
 // ── Achievements Routes ─────────────────────────────────────
 router.get('/achievements', petCtrl.getAchievements);

@@ -6,6 +6,8 @@ const wishlistRoutes = require('./wishlist.routes');
 const moodRoutes = require('./mood.routes');
 const foodRoutes = require('./food.routes');
 const tripRoutes = require('./trip.routes');
+const periodRoutes = require('./period.routes');
+const cheatsheetRoutes = require('./cheatsheet.routes');
 
 const router = express.Router();
 
@@ -28,6 +30,10 @@ function resolveRouter(routeModule, moduleName) {
 router.use('/auth', resolveRouter(authRoutes, 'auth.routes'));
 router.use('/couple', resolveRouter(coupleRoutes, 'couple.routes'));
 router.use('/couple/pet', resolveRouter(petRoutes, 'pet.routes'));
+router.use('/couple/period', resolveRouter(periodRoutes, 'period.routes'));
+router.use('/period', resolveRouter(periodRoutes, 'period.routes'));
+router.use('/couple/cheatsheet', resolveRouter(cheatsheetRoutes, 'cheatsheet.routes'));
+router.use('/cheatsheet', resolveRouter(cheatsheetRoutes, 'cheatsheet.routes'));
 router.use('/wishlist', resolveRouter(wishlistRoutes, 'wishlist.routes'));
 router.use('/mood', resolveRouter(moodRoutes, 'mood.routes'));
 router.use('/food', resolveRouter(foodRoutes, 'food.routes'));
