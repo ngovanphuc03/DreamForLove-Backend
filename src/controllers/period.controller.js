@@ -4,7 +4,12 @@ const { getIO } = require('../socket/socket.handler');
 const { sendNotificationToUser } = require('../services/firebase.service');
 
 /**
- * Calculates current period status and predictions based on cycle data.
+ * Calculates current period status and medical 4-phase biorhythm predictions based on cycle data.
+ * Medical standard:
+ * 1. Menstrual Phase: Days 1 to periodDuration
+ * 2. Follicular Phase: Days (periodDuration + 1) to (ovulationDay - 4)
+ * 3. Ovulation Window: Days (ovulationDay - 3) to (ovulationDay + 1)
+ * 4. Luteal Phase: After fertile window until end of cycle (last 4 days are PMS)
  */
 function calculatePeriodStatus(lastPeriodDateStr, cycleLength = 28, periodDuration = 5) {
     const lastDate = new Date(lastPeriodDateStr);
@@ -20,39 +25,132 @@ function calculatePeriodStatus(lastPeriodDateStr, cycleLength = 28, periodDurati
     const normalizedDay = (((daysSinceLast % cycleLength) + cycleLength) % cycleLength) + 1;
     const daysUntilNext = cycleLength - normalizedDay + 1;
 
-    // Calculate next period start date
+    // Cycles elapsed and next dates
     const cyclesElapsed = Math.floor(daysSinceLast / cycleLength);
     const nextPeriodDate = new Date(lastDate.getTime() + (cyclesElapsed + 1) * cycleLength * 86400000);
 
+    // Ovulation is approximately 14 days before the next period starts
+    const ovulationDay = Math.max(periodDuration + 2, cycleLength - 14);
+    const fertileWindowStart = Math.max(periodDuration + 1, ovulationDay - 3);
+    const fertileWindowEnd = Math.min(cycleLength - 3, ovulationDay + 1);
+
+    // Current cycle's ovulation calendar date
+    const currentCycleStart = new Date(lastDate.getTime() + cyclesElapsed * cycleLength * 86400000);
+    const ovulationDate = new Date(currentCycleStart.getTime() + (ovulationDay - 1) * 86400000);
+
+    // 4 Medical Phases Determination
+    let phase = 'luteal';
+    let phaseName = 'Pha Hoàng Thể';
+    let phaseEmoji = '🌙';
     let status = 'normal';
-    let title = 'Giai đoạn bình thường 🌸';
-    let advice = 'Nàng đang ở trạng thái thoải mái. Cùng nhau lên lịch hẹn hò vui vẻ nhé!';
+    let fertility = 'low';
+    let fertilityLabel = 'Thấp';
+    let estrogenLevel = 'Trung bình';
+    let progesteroneLevel = 'Cao';
+    let energyScore = 65;
+    let title = 'Pha Hoàng Thể (Thư Giãn & Ấm Áp) 🌙';
+    let advice = 'Progesterone tăng giúp cơ thể nàng ấm áp, thích không gian yên tĩnh và bình an. Thích hợp cho buổi hẹn hò xem phim nhẹ nhàng tại gia!';
     let isPeriodToday = false;
     let isPmsToday = false;
+    let isOvulationToday = false;
 
     if (normalizedDay <= periodDuration) {
+        // 1. Menstrual Phase
+        phase = 'menstrual';
+        phaseName = 'Pha Hành Kinh';
+        phaseEmoji = '🍓';
         status = 'period';
+        fertility = 'very_low';
+        fertilityLabel = 'Rất Thấp (An toàn)';
+        estrogenLevel = 'Mức đáy';
+        progesteroneLevel = 'Mức đáy';
+        energyScore = 30;
         isPeriodToday = true;
-        title = `Đang Trong Kỳ Dâu (Ngày ${normalizedDay}/${periodDuration}) 🍓`;
-        advice = 'Nàng có thể bị đau bụng, mỏi lưng và mệt. Nhớ chuẩn bị túi chườm ấm, đồ ngọt và chiều chuộng nàng hết mực nhé!';
-    } else if (daysUntilNext <= 3) {
-        status = 'pms';
-        isPmsToday = true;
-        title = `Sắp Đến Kỳ (Còn ${daysUntilNext} ngày) ⚠️`;
-        advice = 'Giai đoạn tiền kinh nguyệt (PMS). Nàng rất dễ nhạy cảm và xúc động, hãy chủ động nhường nhịn và lắng nghe nàng nhé!';
+        title = `Pha Hành Kinh (Ngày ${normalizedDay}/${periodDuration}) 🍓`;
+        advice = 'Estrogen & Progesterone ở mức thấp nhất. Nàng dễ đau bụng dưới, chuột rút, đau lưng và mệt mỏi. Nhớ chuẩn bị túi chườm ấm 40°C, pha trà gừng ấm và bồi bổ chất sắt cho nàng nhé!';
+    } else if (normalizedDay < fertileWindowStart) {
+        // 2. Follicular Phase
+        phase = 'follicular';
+        phaseName = 'Pha Nang Trứng';
+        phaseEmoji = '🌱';
+        status = 'follicular';
+        fertility = 'medium';
+        fertilityLabel = 'Trung Bình (Chuẩn bị rụng trứng)';
+        estrogenLevel = 'Tăng mạnh';
+        progesteroneLevel = 'Thấp';
+        energyScore = 85;
+        title = `Pha Nang Trứng (Tái Tạo Năng Lượng) 🌱`;
+        advice = 'Estrogen tăng mạnh giúp da dẻ nàng sáng mịn, tinh thần phấn chấn và tràn đầy sức sống. Đây là thời điểm lý tưởng nhất để hẹn hò, khám phá địa điểm mới hoặc tập thể dục cùng nhau!';
+    } else if (normalizedDay >= fertileWindowStart && normalizedDay <= fertileWindowEnd) {
+        // 3. Ovulation Window
+        phase = 'ovulation';
+        phaseName = 'Cửa Sổ Rụng Trứng';
+        phaseEmoji = '🌟';
+        status = 'ovulation';
+        fertility = 'peak';
+        fertilityLabel = 'ĐỈNH ĐIỂM (Rất Dễ Thụ Thai)';
+        estrogenLevel = 'Cực đại (Peak)';
+        progesteroneLevel = 'Bắt đầu tăng';
+        energyScore = 95;
+        isOvulationToday = normalizedDay === ovulationDay;
+        title = isOvulationToday
+            ? `Ngày Rụng Trứng Đỉnh Điểm 🌟`
+            : `Cửa Sổ Rụng Trứng (Khả Năng Thụ Thai Cao) 🌟`;
+        advice = 'Nàng đang ở đỉnh cao quyến rũ, nữ tính và muốn được gần gũi nhất chu kỳ. LƯU Ý Y KHOA: Khả năng thụ thai ở mức ĐỈNH ĐIỂM, hãy lưu ý biện pháp bảo vệ an toàn nếu chưa sẵn sàng đón em bé!';
+    } else {
+        // 4. Luteal Phase (with PMS in the last 4 days)
+        if (daysUntilNext <= 4) {
+            phase = 'luteal';
+            phaseName = 'Pha Hoàng Thể (PMS)';
+            phaseEmoji = '⚠️';
+            status = 'pms';
+            fertility = 'low';
+            fertilityLabel = 'Thấp';
+            estrogenLevel = 'Tụt dốc';
+            progesteroneLevel = 'Tụt dốc';
+            energyScore = 45;
+            isPmsToday = true;
+            title = `Giai Đoạn PMS (Còn ${daysUntilNext} ngày đến kỳ) ⚠️`;
+            advice = 'Giai đoạn tiền kinh nguyệt (PMS): Hormone sụt giảm nhanh khiến nàng dễ nhạy cảm, cáu gắt vô cớ, mỏi mệt và thèm đồ ngọt. Hãy kiên nhẫn nhường nhịn, chuẩn bị trà sữa ấm và ôm dỗ nàng nhiều hơn!';
+        } else {
+            phase = 'luteal';
+            phaseName = 'Pha Hoàng Thể';
+            phaseEmoji = '🌙';
+            status = 'normal';
+            fertility = 'low';
+            fertilityLabel = 'Thấp';
+            estrogenLevel = 'Trung bình';
+            progesteroneLevel = 'Đỉnh cao';
+            energyScore = 65;
+            title = `Pha Hoàng Thể (Thư Giãn & Ấm Áp) 🌙`;
+            advice = 'Progesterone tăng giúp cơ thể nàng ấm áp, thích không gian yên tĩnh và bình an. Thích hợp cho buổi hẹn hò xem phim nhẹ nhàng tại gia!';
+        }
     }
 
     return {
         configured: true,
         lastPeriodDate: lastDate.toISOString().split('T')[0],
         nextPeriodDate: nextPeriodDate.toISOString().split('T')[0],
+        ovulationDate: ovulationDate.toISOString().split('T')[0],
         cycleLength,
         periodDuration,
         currentCycleDay: normalizedDay,
         daysUntilNext,
+        ovulationDay,
+        fertileWindowStart,
+        fertileWindowEnd,
+        phase,
+        phaseName,
+        phaseEmoji,
+        fertility,
+        fertilityLabel,
+        estrogenLevel,
+        progesteroneLevel,
+        energyScore,
         status,
         isPeriodToday,
         isPmsToday,
+        isOvulationToday,
         title,
         advice,
     };

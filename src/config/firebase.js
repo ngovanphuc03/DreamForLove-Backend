@@ -42,7 +42,25 @@ async function verifyIdToken(token) {
     return admin.auth().verifyIdToken(token);
 }
 
-async function sendPushNotification({ token, title, body, data }) {
+async function sendPushNotification(arg1, arg2) {
+    let token, title, body, data;
+    if (typeof arg1 === 'string') {
+        token = arg1;
+        title = arg2?.title;
+        body = arg2?.body;
+        data = arg2?.data;
+    } else if (typeof arg1 === 'object' && arg1 !== null) {
+        token = arg1.token;
+        title = arg1.title;
+        body = arg1.body;
+        data = arg1.data;
+    }
+
+    if (!token) {
+        logger.warn('[FCM] sendPushNotification skipped: missing device token');
+        return false;
+    }
+
     if (devMode) {
         logger.debug(`[FCM stub] → token=${token} title="${title}" body="${body}"`);
         return true;

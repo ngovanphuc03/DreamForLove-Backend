@@ -270,6 +270,59 @@ function initSocket(io) {
             }
         });
 
+        // ── Event: trip heading out notification ────────────────────────────────
+        socket.on('trip:heading_out', async (payload = {}) => {
+            if (!socket.coupleRoomId) return;
+            const senderName = socket.dbUser.display_name || 'Người ấy';
+            const { placeTitle = 'điểm hẹn', destination = '', travelMode = 'Xe máy', emoji = '🛵' } = payload;
+
+            // 1. Broadcast realtime to room
+            socket.to(`room:${socket.coupleRoomId}`).emit('trip:heading_out', {
+                senderId: userId,
+                senderName,
+                placeTitle,
+                destination,
+                travelMode,
+                emoji,
+                headingOutAt: new Date().toISOString(),
+            });
+
+            // 2. Fallback push notification if partner is offline
+            try {
+                const partnerRes = await query(
+                    `SELECT u.id, u.fcm_token
+                     FROM users u
+                     JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                     WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [socket.coupleRoomId, userId]
+                );
+                if (partnerRes.rows.length) {
+                    const partner = partnerRes.rows[0];
+                    const partnerOnline = isUserOnline(partner.id);
+                    if (!partnerOnline && partner.fcm_token) {
+                        const title = `${emoji} ${senderName} đang xuất phát!`;
+                        const body = `Đang tới ${placeTitle} bằng ${travelMode}. Chuẩn bị gặp nhau nhé 💕`;
+                        await sendPushNotification({
+                            token: partner.fcm_token,
+                            title,
+                            body,
+                            data: {
+                                type: 'TRIP_HEADING_OUT',
+                                senderName: String(senderName),
+                                placeTitle: String(placeTitle),
+                                destination: String(destination),
+                                travelMode: String(travelMode),
+                                emoji: String(emoji),
+                            },
+                        });
+                    }
+                }
+            } catch (err) {
+                logger.error(`[Socket] trip:heading_out FCM error: ${err.message}`);
+            }
+        });
+
         // ── Event: pet care action (socket alternative to REST) ──────────────────
         socket.on('pet:action', async (payload = {}) => {
             const action = payload?.action;
