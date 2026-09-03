@@ -10,6 +10,10 @@ const {
     getDailyLogs,
     upsertDailyLog,
     deleteDailyLog,
+    getCycleHistory,
+    toggleCycleStart,
+    toggleCycleEnd,
+    deleteCycle,
 } = require('../controllers/period.controller');
 
 // All routes require authentication and active couple room
@@ -22,5 +26,9 @@ router.post('/role', setPeriodRole);
 router.get('/logs', getDailyLogs);
 router.post('/log', upsertDailyLog);
 router.delete('/log/:date', deleteDailyLog);
+router.get('/cycles', getCycleHistory);
+router.post('/cycle/start', toggleCycleStart);
+router.post('/cycle/end', toggleCycleEnd);
+router.delete('/cycle/:id', deleteCycle);
 
 module.exports = router;

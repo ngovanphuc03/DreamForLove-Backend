@@ -277,12 +277,10 @@ async function bootstrap() {
     if (dbAvailable) {
         const startCleanupJob = resolveJobFunction(cleanupJobModule, 'startCleanupJob');
         const startCodeCleanupJob = resolveJobFunction(cleanupJobModule, 'startCodeCleanupJob');
-        const startPetDecayJob = resolveJobFunction(cleanupJobModule, 'startPetDecayJob');
 
         startCleanupJob?.();
         startCodeCleanupJob?.();
-        startPetDecayJob?.();
-        logger.info('✅ Cron jobs initialized (cleanup + pet decay)');
+        logger.info('✅ Cron jobs initialized (cleanup)');
     } else {
         logger.warn('⚠️  Cron jobs skipped (no DB connection).');
     }

@@ -176,13 +176,6 @@ async function markBought(req, res, next) {
                 action: 'update',
                 item: resultItem,
             });
-
-            if (txResult.rewardResult?.awardedCoins > 0) {
-                io.to(`room:${roomId}`).emit('pet:inventory_update', {
-                    loveCoins: txResult.rewardResult.loveCoins,
-                    inventory: txResult.rewardResult.inventory,
-                });
-            }
         }
 
         // FCM push khi đánh dấu đã mua

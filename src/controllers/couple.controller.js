@@ -382,13 +382,21 @@ async function getProgress(req, res, next) {
                 HAVING BOOL_OR(user_id = $2)
                    AND BOOL_OR($3::uuid IS NOT NULL AND user_id = $3::uuid)
             ),
+            today_status AS (
+                SELECT
+                    COALESCE(BOOL_OR(day = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date), FALSE) AS today_done,
+                    COALESCE(BOOL_OR(day = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - 1), FALSE) AS yesterday_done
+                FROM qualified_days
+            ),
             ranked AS (
                 SELECT
-                    day,
-                    ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - day) AS day_offset,
-                    ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS rn
-                FROM qualified_days
-                WHERE day <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+                    q.day,
+                    ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - (CASE WHEN ts.today_done THEN 0 ELSE 1 END) - q.day) AS day_offset,
+                    ROW_NUMBER() OVER (ORDER BY q.day DESC) - 1 AS rn
+                FROM qualified_days q
+                CROSS JOIN today_status ts
+                WHERE (ts.today_done OR ts.yesterday_done)
+                  AND q.day <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
             )
             SELECT COALESCE(COUNT(*), 0)::int AS current_streak
             FROM ranked
@@ -620,7 +628,7 @@ async function updateStartDate(req, res, next) {
              SET start_date = $2,
                  updated_at = NOW()
              WHERE id = $1 AND status = 'active'
-             RETURNING id, start_date, CURRENT_DATE - start_date AS days_together`,
+             RETURNING id, start_date, ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - start_date) AS days_together`,
             [roomId, start_date]
         );
 

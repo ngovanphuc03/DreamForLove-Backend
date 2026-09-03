@@ -211,13 +211,6 @@ async function markDone(req, res, next) {
                 action: 'update',
                 item: tripItem,
             });
-
-            if (txResult.rewardResult?.awardedCoins > 0) {
-                io.to(`room:${roomId}`).emit('pet:inventory_update', {
-                    loveCoins: txResult.rewardResult.loveCoins,
-                    inventory: txResult.rewardResult.inventory,
-                });
-            }
         }
 
         res.json(tripItem);
