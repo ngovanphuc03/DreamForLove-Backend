@@ -100,9 +100,4 @@ function startCodeCleanupJob() {
     });
 }
 
-/**
- * Decay pet stats every 4 hours.
- * For each pet, reduce health/mood/hunger/cleanliness by DECAY_PER_INTERVAL
- * for each 4-hour interval since last_decay_at.
- * Sends socket alerts for critical stats and handles pet death.
 module.exports = { startCleanupJob, startCodeCleanupJob };
