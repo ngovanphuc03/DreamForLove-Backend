@@ -170,16 +170,20 @@ async function getPeriodData(req, res) {
         }
 
         const result = await pool.query(
-            `SELECT last_period_date, cycle_length, period_duration, notes, updated_at
+            `SELECT last_period_date, cycle_length, period_duration, notes, female_user_id, updated_at
              FROM couple_period_settings
              WHERE couple_room_id = $1`,
             [coupleRoomId]
         );
 
+        const currentUserId = req.dbUser?.id || req.user?.id;
+
         if (result.rows.length === 0) {
             return res.json({
                 configured: false,
                 message: 'Chưa thiết lập ngày chu kỳ',
+                femaleUserId: null,
+                isCurrentUserFemale: null,
             });
         }
 
@@ -190,9 +194,14 @@ async function getPeriodData(req, res) {
             row.period_duration
         );
 
+        const femaleUserId = row.female_user_id;
+        const isCurrentUserFemale = femaleUserId ? (femaleUserId === currentUserId) : null;
+
         return res.json({
             ...statusData,
             notes: row.notes || '',
+            femaleUserId,
+            isCurrentUserFemale,
             updatedAt: row.updated_at,
         });
     } catch (err) {
@@ -215,7 +224,7 @@ async function updatePeriodSettings(req, res) {
             return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
         }
 
-        const { lastPeriodDate, cycleLength = 28, periodDuration = 5, notes } = req.body;
+        const { lastPeriodDate, cycleLength = 28, periodDuration = 5, notes, asFemale } = req.body;
 
         if (!lastPeriodDate || isNaN(Date.parse(lastPeriodDate))) {
             return res.status(400).json({ error: 'Ngày bắt đầu chu kỳ không hợp lệ' });
@@ -223,19 +232,21 @@ async function updatePeriodSettings(req, res) {
 
         const cLen = Math.min(Math.max(parseInt(cycleLength, 10) || 28, 20), 45);
         const pDur = Math.min(Math.max(parseInt(periodDuration, 10) || 5, 2), 10);
+        const targetFemaleId = (asFemale === true || asFemale === 'true') ? userId : null;
 
         const result = await pool.query(
-            `INSERT INTO couple_period_settings (couple_room_id, last_period_date, cycle_length, period_duration, notes, updated_at)
-             VALUES ($1, $2, $3, $4, $5, NOW())
+            `INSERT INTO couple_period_settings (couple_room_id, last_period_date, cycle_length, period_duration, notes, female_user_id, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())
              ON CONFLICT (couple_room_id)
              DO UPDATE SET
                 last_period_date = EXCLUDED.last_period_date,
                 cycle_length = EXCLUDED.cycle_length,
                 period_duration = EXCLUDED.period_duration,
                 notes = EXCLUDED.notes,
+                female_user_id = COALESCE(EXCLUDED.female_user_id, couple_period_settings.female_user_id),
                 updated_at = NOW()
-             RETURNING last_period_date, cycle_length, period_duration, notes, updated_at`,
-            [coupleRoomId, lastPeriodDate, cLen, pDur, notes || null]
+             RETURNING last_period_date, cycle_length, period_duration, notes, female_user_id, updated_at`,
+            [coupleRoomId, lastPeriodDate, cLen, pDur, notes || null, targetFemaleId]
         );
 
         const row = result.rows[0];
@@ -245,9 +256,13 @@ async function updatePeriodSettings(req, res) {
             row.period_duration
         );
 
+        const femaleUserId = row.female_user_id;
+        const isCurrentUserFemale = femaleUserId ? (femaleUserId === userId) : true;
+
         const payload = {
             ...statusData,
             notes: row.notes || '',
+            femaleUserId,
             updatedAt: row.updated_at,
             updatedBy: userId,
         };
@@ -340,8 +355,68 @@ async function sendPeriodSOS(req, res) {
     }
 }
 
+/**
+ * POST /api/couple/period/role
+ * Set user role (female/male) and sync across couple devices.
+ */
+async function setPeriodRole(req, res) {
+    try {
+        const pool = getPool();
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
+        const userId = req.dbUser?.id || req.user?.id;
+        const { role } = req.body; // 'female' or 'male'
+
+        if (!coupleRoomId) {
+            return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
+        }
+
+        let femaleUserId = null;
+        if (role === 'female') {
+            femaleUserId = userId;
+        } else if (role === 'male') {
+            const roomRes = await pool.query(
+                `SELECT user_a_id, user_b_id FROM couple_rooms WHERE id = $1`,
+                [coupleRoomId]
+            );
+            if (roomRes.rows.length) {
+                const r = roomRes.rows[0];
+                femaleUserId = (r.user_a_id === userId) ? r.user_b_id : r.user_a_id;
+            }
+        }
+
+        if (femaleUserId) {
+            await pool.query(
+                `INSERT INTO couple_period_settings (couple_room_id, last_period_date, female_user_id, updated_at)
+                 VALUES ($1, CURRENT_DATE, $2, NOW())
+                 ON CONFLICT (couple_room_id)
+                 DO UPDATE SET female_user_id = $2, updated_at = NOW()`,
+                [coupleRoomId, femaleUserId]
+            );
+
+            try {
+                const io = getIO();
+                if (io) {
+                    io.to(`room:${coupleRoomId}`).emit('period:role_synced', {
+                        femaleUserId,
+                    });
+                }
+            } catch (_) {}
+        }
+
+        return res.json({
+            success: true,
+            femaleUserId,
+            isCurrentUserFemale: femaleUserId === userId,
+        });
+    } catch (err) {
+        logger.error('Error in setPeriodRole:', err);
+        return res.status(500).json({ error: 'Không lưu được vai trò' });
+    }
+}
+
 module.exports = {
     getPeriodData,
     updatePeriodSettings,
     sendPeriodSOS,
+    setPeriodRole,
 };
