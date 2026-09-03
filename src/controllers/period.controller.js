@@ -163,7 +163,7 @@ function calculatePeriodStatus(lastPeriodDateStr, cycleLength = 28, periodDurati
 async function getPeriodData(req, res) {
     try {
         const pool = getPool();
-        const coupleRoomId = req.user.coupleRoomId;
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
 
         if (!coupleRoomId) {
             return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
@@ -208,8 +208,8 @@ async function getPeriodData(req, res) {
 async function updatePeriodSettings(req, res) {
     try {
         const pool = getPool();
-        const coupleRoomId = req.user.coupleRoomId;
-        const userId = req.user.id;
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
+        const userId = req.dbUser?.id || req.user?.id;
 
         if (!coupleRoomId) {
             return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
@@ -276,8 +276,8 @@ async function updatePeriodSettings(req, res) {
 async function sendPeriodSOS(req, res) {
     try {
         const pool = getPool();
-        const coupleRoomId = req.user.coupleRoomId;
-        const senderId = req.user.id;
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
+        const senderId = req.dbUser?.id || req.user?.id;
 
         if (!coupleRoomId) {
             return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });

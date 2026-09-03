@@ -39,4 +39,4 @@ async function verifyAuth(req, res, next) {
     next();
 }
 
-module.exports = { verifyAuth };
+module.exports = { verifyAuth, authenticate: verifyAuth };

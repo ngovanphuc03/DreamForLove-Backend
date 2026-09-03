@@ -1,14 +1,15 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth.middleware');
+const { verifyAuth } = require('../middleware/auth.middleware');
+const { requireCouple } = require('../middleware/couple.middleware');
 const {
     getPeriodData,
     updatePeriodSettings,
     sendPeriodSOS,
 } = require('../controllers/period.controller');
 
-// All routes require authentication
-router.use(authenticate);
+// All routes require authentication and active couple room
+router.use(verifyAuth, requireCouple);
 
 router.get('/', getPeriodData);
 router.put('/', updatePeriodSettings);
