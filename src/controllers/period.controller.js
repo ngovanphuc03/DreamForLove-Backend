@@ -529,9 +529,178 @@ async function setPeriodRole(req, res) {
     }
 }
 
+/**
+ * GET /api/couple/period/logs?month=2026-09
+ * Fetch daily symptom logs for a specific month or range.
+ */
+async function getDailyLogs(req, res) {
+    try {
+        const pool = getPool();
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
+        if (!coupleRoomId) {
+            return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
+        }
+
+        const { month, startDate, endDate } = req.query;
+        let query = `
+            SELECT id, log_date::text as log_date, flow_level, pain_level, moods, symptoms,
+                   cervical_mucus, temperature, notes, created_by, updated_at
+            FROM couple_period_daily_logs
+            WHERE couple_room_id = $1
+        `;
+        const params = [coupleRoomId];
+
+        if (month && /^\d{4}-\d{2}$/.test(month)) {
+            params.push(`${month}-01`);
+            query += ` AND log_date >= $2 AND log_date < ($2::date + INTERVAL '1 month')`;
+        } else if (startDate && endDate) {
+            params.push(startDate, endDate);
+            query += ` AND log_date >= $2 AND log_date <= $3`;
+        } else {
+            query += ` AND log_date >= CURRENT_DATE - INTERVAL '60 days' AND log_date <= CURRENT_DATE + INTERVAL '30 days'`;
+        }
+
+        query += ` ORDER BY log_date ASC`;
+
+        const result = await pool.query(query, params);
+        return res.json({
+            success: true,
+            logs: result.rows,
+        });
+    } catch (err) {
+        logger.error('Error in getDailyLogs:', err);
+        return res.status(500).json({ error: 'Không lấy được nhật ký triệu chứng' });
+    }
+}
+
+/**
+ * POST /api/couple/period/log
+ * Upsert daily symptom log for a date.
+ */
+async function upsertDailyLog(req, res) {
+    try {
+        const pool = getPool();
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
+        const userId = req.dbUser?.id || req.user?.id;
+        if (!coupleRoomId) {
+            return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
+        }
+
+        const {
+            logDate,
+            flowLevel = 0,
+            painLevel = 0,
+            moods = [],
+            symptoms = [],
+            cervicalMucus = null,
+            temperature = null,
+            notes = '',
+        } = req.body;
+
+        if (!logDate || isNaN(Date.parse(logDate))) {
+            return res.status(400).json({ error: 'Ngày ghi nhận không hợp lệ' });
+        }
+
+        const parsedDate = new Date(logDate).toISOString().split('T')[0];
+        const flow = Math.min(Math.max(parseInt(flowLevel, 10) || 0, 0), 4);
+        const pain = Math.min(Math.max(parseInt(painLevel, 10) || 0, 0), 4);
+        const temp = temperature ? parseFloat(temperature) : null;
+
+        const result = await pool.query(
+            `INSERT INTO couple_period_daily_logs
+             (couple_room_id, log_date, flow_level, pain_level, moods, symptoms, cervical_mucus, temperature, notes, created_by, updated_at)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, NOW())
+             ON CONFLICT (couple_room_id, log_date)
+             DO UPDATE SET
+                flow_level = EXCLUDED.flow_level,
+                pain_level = EXCLUDED.pain_level,
+                moods = EXCLUDED.moods,
+                symptoms = EXCLUDED.symptoms,
+                cervical_mucus = EXCLUDED.cervical_mucus,
+                temperature = EXCLUDED.temperature,
+                notes = EXCLUDED.notes,
+                created_by = EXCLUDED.created_by,
+                updated_at = NOW()
+             RETURNING id, log_date::text as log_date, flow_level, pain_level, moods, symptoms, cervical_mucus, temperature, notes, updated_at`,
+            [
+                coupleRoomId,
+                parsedDate,
+                flow,
+                pain,
+                JSON.stringify(Array.isArray(moods) ? moods : []),
+                JSON.stringify(Array.isArray(symptoms) ? symptoms : []),
+                cervicalMucus || null,
+                temp,
+                notes || '',
+                userId,
+            ]
+        );
+
+        const savedLog = result.rows[0];
+
+        // Realtime broadcast to partner
+        try {
+            const io = getIO();
+            if (io) {
+                io.to(`room:${coupleRoomId}`).emit('period:log_updated', savedLog);
+            }
+        } catch (wsErr) {
+            logger.warn('Socket broadcast failed for period:log_updated:', wsErr);
+        }
+
+        return res.json({
+            success: true,
+            log: savedLog,
+        });
+    } catch (err) {
+        logger.error('Error in upsertDailyLog:', err);
+        return res.status(500).json({ error: 'Không lưu được nhật ký triệu chứng' });
+    }
+}
+
+/**
+ * DELETE /api/couple/period/log/:date
+ */
+async function deleteDailyLog(req, res) {
+    try {
+        const pool = getPool();
+        const coupleRoomId = req.coupleRoom?.id || req.user?.coupleRoomId;
+        if (!coupleRoomId) {
+            return res.status(400).json({ error: 'Chưa tham gia phòng đôi' });
+        }
+
+        const { date } = req.params;
+        if (!date || isNaN(Date.parse(date))) {
+            return res.status(400).json({ error: 'Ngày không hợp lệ' });
+        }
+
+        const parsedDate = new Date(date).toISOString().split('T')[0];
+        await pool.query(
+            `DELETE FROM couple_period_daily_logs WHERE couple_room_id = $1 AND log_date = $2`,
+            [coupleRoomId, parsedDate]
+        );
+
+        try {
+            const io = getIO();
+            if (io) {
+                io.to(`room:${coupleRoomId}`).emit('period:log_deleted', { logDate: parsedDate });
+            }
+        } catch (_) {}
+
+        return res.json({ success: true, logDate: parsedDate });
+    } catch (err) {
+        logger.error('Error in deleteDailyLog:', err);
+        return res.status(500).json({ error: 'Không xóa được nhật ký' });
+    }
+}
+
 module.exports = {
     getPeriodData,
     updatePeriodSettings,
     sendPeriodSOS,
     setPeriodRole,
+    getDailyLogs,
+    upsertDailyLog,
+    deleteDailyLog,
 };
+
