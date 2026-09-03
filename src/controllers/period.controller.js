@@ -1,7 +1,7 @@
 const { getPool } = require('../config/database');
 const logger = require('../config/logger');
 const { getIO } = require('../socket/socket.handler');
-const { sendNotificationToUser } = require('../services/firebase.service');
+const { sendPushNotification } = require('../config/firebase');
 
 /**
  * Calculates current period status and medical 4-phase biorhythm predictions based on cycle data.
@@ -319,7 +319,8 @@ async function sendPeriodSOS(req, res) {
         // Push notification fallback
         if (partner && partner.fcm_token) {
             try {
-                await sendNotificationToUser(partner.id, {
+                await sendPushNotification({
+                    token: partner.fcm_token,
                     title: `🍓 ${senderName} cần bạn dỗ dành nè!`,
                     body: note,
                     data: {
