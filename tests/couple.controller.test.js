@@ -161,11 +161,15 @@ describe('disconnect', () => {
 // ────────────────────────────────────────────────────────────
 describe('getProgress', () => {
     it('should return computed streak and level payload', async () => {
-        mockQuery
-            .mockResolvedValueOnce({ rows: [{ me_done: true, partner_done: false }] })
-            .mockResolvedValueOnce({ rows: [{ current_streak: 3 }] })
-            .mockResolvedValueOnce({ rows: [{ best_streak: 8 }] })
-            .mockResolvedValueOnce({ rows: [{ total_qualified_days: 10 }] });
+        mockQuery.mockResolvedValueOnce({
+            rows: [{
+                me_done: true,
+                partner_done: false,
+                current_streak: 3,
+                best_streak: 8,
+                total_qualified_days: 10,
+            }],
+        });
 
         const req = mockReq({
             dbUser: { id: 'uuid-user-a', display_name: 'A' },

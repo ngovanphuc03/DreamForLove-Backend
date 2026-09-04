@@ -6,6 +6,7 @@ const moodRoutes = require('./mood.routes');
 const foodRoutes = require('./food.routes');
 const tripRoutes = require('./trip.routes');
 const periodRoutes = require('./period.routes');
+const doodleRoutes = require('./doodle.routes');
 
 const router = express.Router();
 
@@ -33,5 +34,6 @@ router.use('/wishlist', resolveRouter(wishlistRoutes, 'wishlist.routes'));
 router.use('/mood', resolveRouter(moodRoutes, 'mood.routes'));
 router.use('/food', resolveRouter(foodRoutes, 'food.routes'));
 router.use('/trips', resolveRouter(tripRoutes, 'trip.routes'));
+router.use('/doodles', resolveRouter(doodleRoutes, 'doodle.routes'));
 
 module.exports = router;

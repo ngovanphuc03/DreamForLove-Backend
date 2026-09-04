@@ -106,7 +106,9 @@ describe('Memory Controller', () => {
 
         it('should call next on database error', async () => {
             const err = new Error('DB error');
-            mockQuery.mockRejectedValueOnce(err);
+            mockQuery
+                .mockResolvedValueOnce({ rows: [] })
+                .mockRejectedValueOnce(err);
 
             const req = mockReq({
                 body: { image_base64: 'data:image/png;base64,abc' },
