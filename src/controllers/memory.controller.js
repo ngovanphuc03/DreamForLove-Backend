@@ -1,6 +1,7 @@
 const { query } = require('../config/database');
 const { getIO } = require('../socket/socket.handler');
 const { uploadImage, deleteImage, parseBase64Image } = require('../config/storage');
+const { sendPushNotification } = require('../config/firebase');
 const logger = require('../config/logger');
 
 async function deleteOldMemoryPhoto(roomId) {
@@ -67,6 +68,38 @@ async function updateMemoryPhoto(req, res, next) {
                 updatedAt: updated?.updated_at || new Date().toISOString(),
             });
         }
+
+        // Send real-time FCM push notification to partner in background
+        (async () => {
+            try {
+                const partnerRes = await query(
+                    `SELECT u.fcm_token, u.display_name
+                     FROM users u
+                     JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                     WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [roomId, userId]
+                );
+                const partner = partnerRes.rows[0];
+                if (partner && partner.fcm_token) {
+                    const senderName = req.dbUser.display_name || 'Người ấy';
+                    await sendPushNotification(
+                        partner.fcm_token,
+                        {
+                            title: `📸 ${senderName} vừa gửi một ảnh kỷ niệm mới!`,
+                            body: 'Mở widget hoặc app để xem khoảnh khắc ngọt ngào ngay nhé 💕',
+                        },
+                        {
+                            type: 'memory_photo_update',
+                            photoUrl: photoUrl || '',
+                            roomId,
+                        }
+                    );
+                }
+            } catch (pushErr) {
+                logger.warn(`[MemoryPhoto] Push notification error: ${pushErr.message}`);
+            }
+        })();
 
         return res.json({
             success: true,

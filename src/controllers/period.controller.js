@@ -37,9 +37,9 @@ async function ensurePeriodTables(pool) {
 }
 
 /**
- * Intelligent Biorhythm Analytics:
- * Computes moving averages, cycle variance (regularity), shortest/longest cycles,
- * and actual cycle history similar to Flo.
+ * Flo-Style Intelligent Biorhythm Analytics:
+ * Computes adaptive moving averages (recency weighted), cycle variance (regularity),
+ * outlier filtering, shortest/longest cycles, and database cycle-length persistence.
  */
 async function computeCycleStats(pool, coupleRoomId, baseCycleLength = 28, basePeriodDuration = 5) {
     await ensurePeriodTables(pool);
@@ -72,6 +72,7 @@ async function computeCycleStats(pool, coupleRoomId, baseCycleLength = 28, baseP
     const validLengths = [];
     const validDurations = [];
 
+    // Loop through cycles and calculate cycle lengths from consecutive start dates
     for (let i = 0; i < cycles.length; i++) {
         const c = cycles[i];
         let len = c.cycle_length;
@@ -81,6 +82,11 @@ async function computeCycleStats(pool, coupleRoomId, baseCycleLength = 28, baseP
             len = Math.round((nextStart - thisStart) / 86400000);
             if (len >= 18 && len <= 60) {
                 c.cycle_length = len;
+                // Asynchronously persist computed length into DB
+                pool.query(
+                    `UPDATE couple_period_cycles SET cycle_length = $1, updated_at = NOW() WHERE id = $2`,
+                    [len, c.id]
+                ).catch(err => logger.warn('[Period] Failed to persist cycle_length:', err.message));
             }
         }
         if (len && len >= 18 && len <= 60) {
@@ -92,40 +98,69 @@ async function computeCycleStats(pool, coupleRoomId, baseCycleLength = 28, baseP
             dur = Math.round((new Date(c.end_date) - new Date(c.start_date)) / 86400000) + 1;
             c.period_duration = dur;
         }
-        if (dur && dur >= 2 && dur <= 12) {
+        if (dur && dur >= 2 && dur <= 14) {
             validDurations.push(dur);
         }
     }
 
-    const avgCycleLength = validLengths.length
-        ? Math.round(validLengths.reduce((a, b) => a + b, 0) / validLengths.length)
-        : baseCycleLength;
+    // Flo Adaptive Prediction: Filter extreme outliers (e.g. missed cycle > 50 days or < 20 days)
+    const normalLengths = validLengths.filter(l => l >= 21 && l <= 45);
+    const candidateLengths = normalLengths.length > 0 ? normalLengths : validLengths;
 
-    const avgPeriodDuration = validDurations.length
-        ? Math.round(validDurations.reduce((a, b) => a + b, 0) / validDurations.length)
-        : basePeriodDuration;
+    let avgCycleLength = baseCycleLength;
+    if (candidateLengths.length > 0) {
+        if (candidateLengths.length === 1) {
+            avgCycleLength = candidateLengths[0];
+        } else if (candidateLengths.length === 2) {
+            // Recency weights: 60% latest, 40% previous
+            avgCycleLength = Math.round(candidateLengths[0] * 0.60 + candidateLengths[1] * 0.40);
+        } else if (candidateLengths.length === 3) {
+            // Recency weights: 50% latest, 30% second, 20% third
+            avgCycleLength = Math.round(candidateLengths[0] * 0.50 + candidateLengths[1] * 0.30 + candidateLengths[2] * 0.20);
+        } else {
+            // 4+ cycles: Weighted moving average over last 4
+            avgCycleLength = Math.round(
+                candidateLengths[0] * 0.40 +
+                candidateLengths[1] * 0.30 +
+                candidateLengths[2] * 0.20 +
+                candidateLengths[3] * 0.10
+            );
+        }
+    }
 
+    // Adaptive Duration Average
+    let avgPeriodDuration = basePeriodDuration;
+    if (validDurations.length > 0) {
+        if (validDurations.length === 1) {
+            avgPeriodDuration = validDurations[0];
+        } else {
+            const sum = validDurations.reduce((a, b) => a + b, 0);
+            avgPeriodDuration = Math.round(sum / validDurations.length);
+        }
+    }
+
+    // Regularity measurement (Standard deviation of non-outlier cycle lengths)
     let regularity = 'regular';
     let regularityLabel = 'Chu kỳ rất đều đặn ✅';
-    if (validLengths.length >= 2) {
-        const mean = validLengths.reduce((a, b) => a + b, 0) / validLengths.length;
-        const variance = validLengths.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / validLengths.length;
+    if (candidateLengths.length >= 2) {
+        const mean = candidateLengths.reduce((a, b) => a + b, 0) / candidateLengths.length;
+        const variance = candidateLengths.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / candidateLengths.length;
         const stdDev = Math.sqrt(variance);
 
-        if (stdDev <= 2.5) {
+        if (stdDev <= 2.0) {
             regularity = 'regular';
-            regularityLabel = `Chu kỳ rất đều (±${stdDev.toFixed(1)} ngày) ✅`;
-        } else if (stdDev <= 5.0) {
+            regularityLabel = `Chu kỳ cực đều (±${stdDev.toFixed(1)} ngày) ✅`;
+        } else if (stdDev <= 4.5) {
             regularity = 'slightly_irregular';
             regularityLabel = `Chu kỳ tương đối đều (±${stdDev.toFixed(1)} ngày) ⚖️`;
         } else {
             regularity = 'irregular';
-            regularityLabel = `Chu kỳ biến động (±${stdDev.toFixed(1)} ngày) ⚠️`;
+            regularityLabel = `Chu kỳ có biến động (±${stdDev.toFixed(1)} ngày) ⚠️`;
         }
     }
 
-    const shortestCycle = validLengths.length ? Math.min(...validLengths) : baseCycleLength;
-    const longestCycle = validLengths.length ? Math.max(...validLengths) : baseCycleLength;
+    const shortestCycle = candidateLengths.length ? Math.min(...candidateLengths) : baseCycleLength;
+    const longestCycle = candidateLengths.length ? Math.max(...candidateLengths) : baseCycleLength;
     const finalAvgCycle = Math.min(Math.max(avgCycleLength, 20), 45);
     const finalAvgDuration = Math.min(Math.max(avgPeriodDuration, 2), 10);
 
@@ -572,12 +607,12 @@ async function getPeriodData(req, res) {
             effectiveDuration
         );
 
-        // Clinical Biomarker Fusion (ACOG/FIGO standard):
-        // Query recent biomarker logs (last 14 days) to refine ovulation & detect risks
+        // Clinical Biomarker Fusion (ACOG/FIGO/Flo Standard):
+        // Query recent biomarker logs (last 30 days) to detect thermal shift, LH surge, intimacy risks
         const recentLogsRes = await pool.query(
             `SELECT log_date::text as log_date, flow_level, pain_level, cervical_mucus, temperature, lh_test, intimacy, contraceptive
              FROM couple_period_daily_logs
-             WHERE couple_room_id = $1 AND log_date >= (CURRENT_DATE - INTERVAL '14 days')
+             WHERE couple_room_id = $1 AND log_date >= (CURRENT_DATE - INTERVAL '30 days')
              ORDER BY log_date DESC`,
             [coupleRoomId]
         );
@@ -585,9 +620,14 @@ async function getPeriodData(req, res) {
 
         // 1. Emergency Contraceptive 72h Golden Window Check
         let emergencyAlert = null;
+        let emergencyPillNotice = null;
         const now = new Date();
         for (const l of recentLogs) {
-            if (l.intimacy === 'unprotected' && l.contraceptive !== 'emergency_pill_72h') {
+            if (l.contraceptive === 'emergency_pill_72h') {
+                emergencyPillNotice = 'Lưu ý y khoa: Bạn đã dùng viên tránh thai khẩn cấp trong chu kỳ này. Thuốc chứa Progestin liều cao có thể gây hiện tượng chảy máu ngắt quãng hoặc khiến kỳ dâu tiếp theo đến sớm/muộn 3-7 ngày.';
+            }
+
+            if (l.intimacy === 'unprotected' && l.contraceptive !== 'emergency_pill_72h' && !emergencyAlert) {
                 const logD = new Date(l.log_date);
                 const diffHours = (now.getTime() - logD.getTime()) / (1000 * 60 * 60);
                 if (diffHours >= 0 && diffHours <= 72) {
@@ -600,12 +640,32 @@ async function getPeriodData(req, res) {
                         title: `Cảnh Báo Khẩn Cấp: Còn ${hoursLeft}h Khung Giờ Vàng! ⚠️`,
                         message: `Hai bạn đã ghi nhận quan hệ không bảo vệ ngày ${l.log_date} trong cửa sổ thụ thai. Nếu chưa có kế hoạch sinh con, hãy cân nhắc sử dụng viên tránh thai khẩn cấp (Levonorgestrel) trước mốc 72 giờ nhé! 💕`,
                     };
+                }
+            }
+        }
+
+        // 2. BBT Biphasic Thermal Shift Analysis (Flo Standard)
+        // Detects if Basal Body Temperature rose by >= 0.2°C sustained for 3+ consecutive days
+        let bbtShiftDetected = false;
+        let bbtOvulationDate = null;
+        const tempLogs = recentLogs
+            .filter(l => l.temperature && l.temperature >= 35.8 && l.temperature <= 38.5)
+            .sort((a, b) => new Date(a.log_date) - new Date(b.log_date));
+
+        if (tempLogs.length >= 6) {
+            // Compute rolling baseline of lower temperatures
+            for (let i = 5; i < tempLogs.length; i++) {
+                const baseline = tempLogs.slice(i - 5, i).reduce((sum, item) => sum + item.temperature, 0) / 5;
+                const nextThree = tempLogs.slice(i, i + 3);
+                if (nextThree.length === 3 && nextThree.every(item => item.temperature >= baseline + 0.18)) {
+                    bbtShiftDetected = true;
+                    bbtOvulationDate = tempLogs[i - 1]?.log_date || tempLogs[i].log_date;
                     break;
                 }
             }
         }
 
-        // 2. Biomarker Fusion: Realtime Ovulation Override
+        // 3. Biomarker Fusion: Realtime Ovulation & Fertility Override
         let fusedStatus = { ...statusData };
         let biomarkerNote = null;
         let ovulationConfirmedByBiomarker = false;
@@ -626,6 +686,9 @@ async function getPeriodData(req, res) {
             fusedStatus.isOvulationToday = true;
             ovulationConfirmedByBiomarker = true;
             biomarkerNote = `Que thử rụng trứng LH ngày ${recentLH.log_date} đạt đỉnh surge. Trứng đang phóng noãn trong 24-36h tới!`;
+        } else if (bbtShiftDetected) {
+            ovulationConfirmedByBiomarker = true;
+            biomarkerNote = `Biến thiên thân nhiệt BBT xác nhận rụng trứng đã diễn ra quanh ngày ${bbtOvulationDate}! Progesterone đang ở mức cao giúp giữ ấm cơ thể.`;
         } else {
             // Check today's cervical mucus
             const todayStr = formatDateYMD(now);
@@ -638,10 +701,29 @@ async function getPeriodData(req, res) {
             }
         }
 
+        // 4. Delayed Period & Pregnancy Risk Alert (Flo Clinical Standard)
+        let pregnancyRiskAlert = null;
+        if (statusData.status === 'late' && statusData.daysLate >= 3) {
+            // Check if there was unprotected sex in the fertile window
+            const hadUnprotectedInCycle = recentLogs.some(l => l.intimacy === 'unprotected' && l.contraceptive !== 'emergency_pill_72h');
+            if (hadUnprotectedInCycle) {
+                pregnancyRiskAlert = {
+                    active: true,
+                    daysLate: statusData.daysLate,
+                    level: 'attention',
+                    title: 'Khuyến Nghị Thử Que Thai (HCG) 🩺',
+                    message: `Kỳ kinh đang chậm ${statusData.daysLate} ngày và bạn từng ghi nhận sinh hoạt thân mật không bảo vệ trong chu kỳ này. Bạn nên dùng que thử thai buổi sáng (nước tiểu đầu tiên) để có kết quả chính xác và an tâm nhất nhé 💕`,
+                };
+            }
+        }
+
         return res.json({
             ...fusedStatus,
             cycleStats,
             emergencyAlert,
+            emergencyPillNotice,
+            pregnancyRiskAlert,
+            bbtShiftDetected,
             biomarkerNote,
             ovulationConfirmedByBiomarker,
             notes: row.notes || '',
@@ -996,20 +1078,37 @@ async function upsertDailyLog(req, res) {
 
         const savedLog = result.rows[0];
 
-        // Intelligent auto-sync: When bleeding (flow_level > 0) is logged, link to cycle history
+        // Intelligent Flo-style auto-sync: When bleeding (flow_level > 0) is logged, link to cycle history
         if (flow > 0) {
             try {
                 await ensurePeriodTables(pool);
-                // Check if there is already a cycle starting near this date (within 7 days)
+                // Check if there is already an active cycle starting within 10 days before this date
                 const nearCycle = await pool.query(
-                    `SELECT id, start_date::text as start_date FROM couple_period_cycles
+                    `SELECT id, start_date::text as start_date, end_date::text as end_date, period_duration
+                     FROM couple_period_cycles
                      WHERE couple_room_id = $1
-                       AND start_date <= $2 AND start_date >= ($2::date - INTERVAL '7 days')
+                       AND start_date <= $2 AND start_date >= ($2::date - INTERVAL '10 days')
                      ORDER BY start_date DESC LIMIT 1`,
                     [coupleRoomId, parsedDate]
                 );
 
-                if (!nearCycle.rows.length) {
+                if (nearCycle.rows.length > 0) {
+                    // Update end_date and recalculate duration
+                    const existingCycle = nearCycle.rows[0];
+                    const currentEnd = existingCycle.end_date;
+                    const newEnd = (!currentEnd || parsedDate > currentEnd) ? parsedDate : currentEnd;
+                    const startDateObj = new Date(existingCycle.start_date);
+                    const endDateObj = new Date(newEnd);
+                    const calculatedDuration = Math.max(Math.round((endDateObj - startDateObj) / 86400000) + 1, 1);
+                    const finalDuration = Math.max(existingCycle.period_duration || 5, calculatedDuration);
+
+                    await pool.query(
+                        `UPDATE couple_period_cycles
+                         SET end_date = $1, period_duration = $2, updated_at = NOW()
+                         WHERE id = $3`,
+                        [newEnd, finalDuration, existingCycle.id]
+                    );
+                } else {
                     // Check if this is a brand new cycle (no cycle within 14 days)
                     const recentCycle = await pool.query(
                         `SELECT id FROM couple_period_cycles
@@ -1020,8 +1119,8 @@ async function upsertDailyLog(req, res) {
 
                     if (!recentCycle.rows.length) {
                         await pool.query(
-                            `INSERT INTO couple_period_cycles (couple_room_id, start_date, period_duration, created_by, updated_at)
-                             VALUES ($1, $2, 5, $3, NOW())
+                            `INSERT INTO couple_period_cycles (couple_room_id, start_date, end_date, period_duration, created_by, updated_at)
+                             VALUES ($1, $2, $2, 1, $3, NOW())
                              ON CONFLICT (couple_room_id, start_date) DO NOTHING`,
                             [coupleRoomId, parsedDate, userId]
                         );
@@ -1032,6 +1131,34 @@ async function upsertDailyLog(req, res) {
                              WHERE couple_room_id = $1 AND (last_period_date IS NULL OR last_period_date < $2)`,
                             [coupleRoomId, parsedDate]
                         );
+
+                        // Auto-calculate previous cycle length if exists
+                        const prevCycle = await pool.query(
+                            `SELECT id, start_date::text as start_date FROM couple_period_cycles
+                             WHERE couple_room_id = $1 AND start_date < $2
+                             ORDER BY start_date DESC LIMIT 1`,
+                            [coupleRoomId, parsedDate]
+                        );
+                        if (prevCycle.rows.length > 0) {
+                            const prevLen = Math.round((new Date(parsedDate) - new Date(prevCycle.rows[0].start_date)) / 86400000);
+                            if (prevLen >= 18 && prevLen <= 60) {
+                                await pool.query(
+                                    `UPDATE couple_period_cycles SET cycle_length = $1, updated_at = NOW() WHERE id = $2`,
+                                    [prevLen, prevCycle.rows[0].id]
+                                );
+                            }
+                        }
+
+                        // Broadcast cycle update
+                        try {
+                            const io = getIO();
+                            if (io) {
+                                io.to(`room:${coupleRoomId}`).emit('period:cycles_updated', {
+                                    action: 'added',
+                                    date: parsedDate,
+                                });
+                            }
+                        } catch (_) {}
                     }
                 }
             } catch (cycleSyncErr) {
@@ -1177,6 +1304,40 @@ async function toggleCycleStart(req, res) {
                 [coupleRoomId, dateStr, userId]
             );
             isActive = true;
+
+            // Recalculate previous cycle length if exists
+            const prevCycle = await pool.query(
+                `SELECT id, start_date::text as start_date FROM couple_period_cycles
+                 WHERE couple_room_id = $1 AND start_date < $2
+                 ORDER BY start_date DESC LIMIT 1`,
+                [coupleRoomId, dateStr]
+            );
+            if (prevCycle.rows.length > 0) {
+                const prevLen = Math.round((new Date(dateStr) - new Date(prevCycle.rows[0].start_date)) / 86400000);
+                if (prevLen >= 18 && prevLen <= 60) {
+                    await pool.query(
+                        `UPDATE couple_period_cycles SET cycle_length = $1, updated_at = NOW() WHERE id = $2`,
+                        [prevLen, prevCycle.rows[0].id]
+                    );
+                }
+            }
+
+            // If a next cycle exists after this date, calculate this cycle's length
+            const nextCycle = await pool.query(
+                `SELECT id, start_date::text as start_date FROM couple_period_cycles
+                 WHERE couple_room_id = $1 AND start_date > $2
+                 ORDER BY start_date ASC LIMIT 1`,
+                [coupleRoomId, dateStr]
+            );
+            if (nextCycle.rows.length > 0) {
+                const thisLen = Math.round((new Date(nextCycle.rows[0].start_date) - new Date(dateStr)) / 86400000);
+                if (thisLen >= 18 && thisLen <= 60) {
+                    await pool.query(
+                        `UPDATE couple_period_cycles SET cycle_length = $1, updated_at = NOW() WHERE couple_room_id = $2 AND start_date = $3`,
+                        [thisLen, coupleRoomId, dateStr]
+                    );
+                }
+            }
         }
 
         // Sync latest start_date with couple_period_settings
