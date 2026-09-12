@@ -255,10 +255,58 @@ async function remove(req, res, next) {
     }
 }
 
+// PATCH /api/trips/:id/packing
+async function updatePackingList(req, res, next) {
+    try {
+        const { id } = req.params;
+        const roomId = req.coupleRoom.id;
+        const { packing_list } = req.body;
+
+        const indices = Array.isArray(packing_list)
+            ? packing_list.map(Number).filter(n => !Number.isNaN(n) && n >= 0)
+            : [];
+
+        const result = await query(
+            `UPDATE trip_plans
+             SET packing_list = $3::jsonb,
+                 updated_at = NOW()
+             WHERE id = $1 AND couple_room_id = $2 AND is_deleted = FALSE
+             RETURNING *`,
+            [id, roomId, JSON.stringify(indices)]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Trip plan not found' });
+        }
+
+        const updatedTrip = result.rows[0];
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('trip:sync', {
+                action: 'packing_update',
+                tripId: id,
+                item: updatedTrip,
+                packing_list: indices,
+            });
+        }
+
+        res.json({
+            success: true,
+            item: updatedTrip,
+            packing_list: indices,
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
 module.exports = {
     list,
     create,
     update,
     markDone,
     remove,
+    updatePackingList,
 };
+

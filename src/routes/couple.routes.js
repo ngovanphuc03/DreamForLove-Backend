@@ -104,6 +104,17 @@ router.patch(
     coupleCtrl.updateStartDate
 );
 
+// PATCH /api/couple/secret-love-note – update secret love note
+router.patch(
+    '/secret-love-note',
+    requireCouple,
+    [
+        body('note').optional({ nullable: true }).isString(),
+    ],
+    validateRequest,
+    coupleCtrl.updateSecretLoveNote
+);
+
 // ── Milestones ──────────────────────────────────────────────────
 router.get('/milestones', requireCouple, coupleCtrl.getMilestones);
 router.post(

@@ -364,7 +364,7 @@ function initSocket(io) {
         });
 
         // ── Event: typing / heartbeat ping ──────────────────────────────────────
-        socket.on('ping:partner', async () => {
+        socket.on('ping:partner', async (data) => {
             if (!socket.coupleRoomId) {
                 logger.warn(`[Socket] ping:partner from ${userId} ignored – no coupleRoomId`);
                 socket.emit('ping:sent', { delivered: false, reason: 'no_room' });
@@ -439,11 +439,13 @@ function initSocket(io) {
             }
 
             const partnerOnline = isUserOnline(partnerId);
+            const pingType = (data && data.type === 'hug') ? 'hug' : 'heartbeat';
 
             // 1. Emit directly to partner user room (robust even if partner has not joined room:<id>)
             io.to(`user:${partnerId}`).emit('partner:ping', {
                 userId,
                 displayName: socket.dbUser.display_name,
+                type: pingType,
             });
 
             // 2. Acknowledge back to sender immediately (do not wait for FCM)
@@ -454,6 +456,7 @@ function initSocket(io) {
                 pushReason: initialPushReason,
                 partnerOnline,
                 partnerId,
+                type: pingType,
             });
 
             // 3. Push notification for when partner app is backgrounded / killed
@@ -462,11 +465,17 @@ function initSocket(io) {
                 (async () => {
                     try {
                         logger.info(`[Socket] Partner (${partnerDisplayName || partnerId}) FCM token: found`);
+                        const pushTitle = pingType === 'hug'
+                            ? `${socket.dbUser.display_name} gửi một cái ôm ấm áp 🤗`
+                            : `${socket.dbUser.display_name} nhớ bạn 💕`;
+                        const pushBody = pingType === 'hug'
+                            ? 'Một cái ôm siết chặt tràn đầy yêu thương từ người ấy 💕'
+                            : 'Chạm vào để xem rung tim!';
                         const sent = await sendPushNotification({
                             token: partnerFcmToken,
-                            title: `${socket.dbUser.display_name} nhớ bạn 💕`,
-                            body: 'Chạm vào để xem rung tim!',
-                            data: { type: 'HEARTBEAT_PING' },
+                            title: pushTitle,
+                            body: pushBody,
+                            data: { type: pingType === 'hug' ? 'WARM_HUG' : 'HEARTBEAT_PING' },
                         });
 
                         socket.emit('ping:sent:update', {
@@ -475,6 +484,7 @@ function initSocket(io) {
                             pushReason: sent ? 'sent' : 'push_send_failed',
                             partnerOnline,
                             partnerId,
+                            type: pingType,
                         });
 
                         if (sent) {

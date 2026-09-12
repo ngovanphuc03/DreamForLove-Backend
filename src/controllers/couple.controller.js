@@ -125,6 +125,9 @@ async function getMyRoom(req, res, next) {
                 partner_birth_date: partnerBirthDate,
                 partner_age: partnerAge,
                 memory_photo_base64: room.memory_photo_url || room.memory_photo_base64 || null,
+                secret_love_note: room.secret_love_note || null,
+                secret_love_note_updated_at: room.secret_love_note_updated_at || null,
+                secret_love_note_author_id: room.secret_love_note_author_id || null,
                 is_active: room.status === 'active',
                 is_premium: room.is_premium || false,
             }
@@ -530,6 +533,7 @@ async function sendHeartbeat(req, res, next) {
         }
 
         const partnerOnline = isUserOnline(partner.id);
+        const pingType = req.body?.type === 'hug' ? 'hug' : 'heartbeat';
 
         // Realtime delivery to partner sockets (if connected)
         const io = getIO();
@@ -537,6 +541,7 @@ async function sendHeartbeat(req, res, next) {
             io.to(`user:${partner.id}`).emit('partner:ping', {
                 userId,
                 displayName: req.dbUser.display_name,
+                type: pingType,
             });
         }
 
@@ -546,11 +551,17 @@ async function sendHeartbeat(req, res, next) {
 
         if (partner.fcm_token) {
             try {
+                const pushTitle = pingType === 'hug'
+                    ? `${req.dbUser.display_name} gửi một cái ôm ấm áp 🤗`
+                    : `${req.dbUser.display_name} nhớ bạn 💕`;
+                const pushBody = pingType === 'hug'
+                    ? 'Một cái ôm siết chặt tràn đầy yêu thương từ người ấy 💕'
+                    : 'Chạm vào để xem rung tim!';
                 pushSent = await sendPushNotification({
                     token: partner.fcm_token,
-                    title: `${req.dbUser.display_name} nhớ bạn 💕`,
-                    body: 'Chạm vào để xem rung tim!',
-                    data: { type: 'HEARTBEAT_PING' },
+                    title: pushTitle,
+                    body: pushBody,
+                    data: { type: pingType === 'hug' ? 'WARM_HUG' : 'HEARTBEAT_PING' },
                 });
                 pushReason = pushSent ? 'sent' : 'push_send_failed';
             } catch (_) {
@@ -722,9 +733,81 @@ async function deleteMilestone(req, res, next) {
     }
 }
 
+// PATCH /api/couple/secret-love-note
+async function updateSecretLoveNote(req, res, next) {
+    try {
+        const roomId = req.coupleRoom.id;
+        const userId = req.dbUser.id;
+        const { note } = req.body;
+
+        const sanitizedNote = typeof note === 'string' ? note.trim() : '';
+
+        const result = await query(
+            `UPDATE couple_rooms
+             SET secret_love_note = $1,
+                 secret_love_note_updated_at = NOW(),
+                 secret_love_note_author_id = $2
+             WHERE id = $3
+             RETURNING secret_love_note, secret_love_note_updated_at, secret_love_note_author_id`,
+            [sanitizedNote.length > 0 ? sanitizedNote : null, userId, roomId]
+        );
+
+        const updated = result.rows[0];
+        const authorName = req.dbUser.display_name || 'Người ấy';
+
+        const io = getIO();
+        if (io) {
+            io.to(`room:${roomId}`).emit('couple:secret-note-updated', {
+                roomId,
+                secretLoveNote: updated.secret_love_note,
+                secretLoveNoteUpdatedAt: updated.secret_love_note_updated_at,
+                secretLoveNoteAuthorId: updated.secret_love_note_author_id,
+                authorName,
+            });
+        }
+
+        // Push notification cho đối phương nếu offline và có thư mới
+        if (sanitizedNote.length > 0) {
+            try {
+                const partnerRes = await query(
+                    `SELECT u.id, u.fcm_token
+                     FROM users u
+                     JOIN couple_rooms cr ON (cr.user_a_id = u.id OR cr.user_b_id = u.id)
+                     WHERE cr.id = $1 AND u.id != $2 AND cr.status = 'active'
+                     LIMIT 1`,
+                    [roomId, userId]
+                );
+                if (partnerRes.rows.length) {
+                    const partner = partnerRes.rows[0];
+                    if (!isUserOnline(partner.id) && partner.fcm_token) {
+                        await sendPushNotification({
+                            token: partner.fcm_token,
+                            title: `💌 Bức thư tình bí mật từ ${authorName}!`,
+                            body: 'Chạm vào để lật mặt sau tấm ảnh và đọc thư nhé 💕',
+                            data: { type: 'SECRET_LOVE_NOTE' },
+                        });
+                    }
+                }
+            } catch (pushErr) {
+                logger.warn(`[Couple] Secret note push failed: ${pushErr.message}`);
+            }
+        }
+
+        res.json({
+            success: true,
+            secret_love_note: updated.secret_love_note,
+            secret_love_note_updated_at: updated.secret_love_note_updated_at,
+            secret_love_note_author_id: updated.secret_love_note_author_id,
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
 module.exports = {
     getMyRoom, generateCode, joinWithCode, disconnect,
     getProgress,
     getMilestones, createMilestone, updateMilestone, deleteMilestone,
-    sendHeartbeat, updateMemoryPhoto, updateStartDate,
+    sendHeartbeat, updateMemoryPhoto, updateStartDate, updateSecretLoveNote,
 };
+

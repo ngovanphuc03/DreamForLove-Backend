@@ -53,8 +53,17 @@ router.patch(
     ],
     validateRequest,
     tripCtrl.markDone
+router.patch(
+    '/:id/packing',
+    [
+        param('id').isUUID(),
+        body('packing_list').isArray(),
+    ],
+    validateRequest,
+    tripCtrl.updatePackingList
 );
 
 router.delete('/:id', [param('id').isUUID()], validateRequest, tripCtrl.remove);
 
 module.exports = router;
+
