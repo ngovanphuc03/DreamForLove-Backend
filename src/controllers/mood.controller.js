@@ -12,7 +12,7 @@ async function getCurrent(req, res, next) {
 
         const result = await query(
             `SELECT DISTINCT ON (user_id)
-              id, type, note, user_id, couple_room_id, created_at
+              id, type, note, user_id, couple_room_id, voice_note_base64, voice_duration_seconds, created_at
        FROM mood_logs
        WHERE couple_room_id = $1
          AND created_at >= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
@@ -68,16 +68,18 @@ async function getHistory(req, res, next) {
 // POST /api/mood
 async function create(req, res, next) {
     try {
-        const { type, note } = req.body;
+        const { type, note, voice_note_base64, voice_duration_seconds } = req.body;
         const { id: roomId } = req.coupleRoom;
         const userId = req.dbUser.id;
 
+        const durationSec = Math.max(0, Math.min(15, parseInt(voice_duration_seconds, 10) || 0));
+
         const { entry, partner, rewardResult } = await transaction(async (client) => {
             const inserted = await client.query(
-                `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note)
-                 VALUES ($1, $2, $3, $4, $5)
+                `INSERT INTO mood_logs (id, couple_room_id, user_id, type, note, voice_note_base64, voice_duration_seconds)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                  RETURNING *`,
-                [uuidv4(), roomId, userId, type, note || null]
+                [uuidv4(), roomId, userId, type, note || null, voice_note_base64 || null, durationSec]
             );
 
             const moodEntry = inserted.rows[0];

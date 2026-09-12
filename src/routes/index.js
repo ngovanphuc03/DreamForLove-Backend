@@ -7,6 +7,7 @@ const foodRoutes = require('./food.routes');
 const tripRoutes = require('./trip.routes');
 const periodRoutes = require('./period.routes');
 const doodleRoutes = require('./doodle.routes');
+const dailyQaRoutes = require('./dailyQa.routes');
 
 const router = express.Router();
 
@@ -28,6 +29,7 @@ function resolveRouter(routeModule, moduleName) {
 
 router.use('/auth', resolveRouter(authRoutes, 'auth.routes'));
 router.use('/couple', resolveRouter(coupleRoutes, 'couple.routes'));
+router.use('/couple/daily-qa', resolveRouter(dailyQaRoutes, 'dailyQa.routes'));
 router.use('/couple/period', resolveRouter(periodRoutes, 'period.routes'));
 router.use('/period', resolveRouter(periodRoutes, 'period.routes'));
 router.use('/wishlist', resolveRouter(wishlistRoutes, 'wishlist.routes'));
